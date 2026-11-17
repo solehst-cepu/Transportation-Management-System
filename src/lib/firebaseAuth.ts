@@ -100,6 +100,17 @@ export async function signInWithGooglePopup(allowedDomain = 'lazuardi.sch.id'): 
   }
 }
 
+export async function getActiveFirebaseIdToken(): Promise<string | null> {
+  try {
+    const auth = getFirebaseAuthInstance();
+    await auth.authStateReady();
+    if (!auth.currentUser) return null;
+    return await auth.currentUser.getIdToken();
+  } catch {
+    return null;
+  }
+}
+
 export async function signOutFirebaseGoogle(): Promise<void> {
   cachedAccessToken = null;
   if (authInstance) {

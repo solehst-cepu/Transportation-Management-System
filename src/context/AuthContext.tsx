@@ -4,9 +4,15 @@ import {
   apiRequest,
   clearInMemoryAuthTokens,
   setInMemoryAuthTokens,
+  setSessionRefresher,
   setUnauthorizedHandler,
 } from '../lib/api.ts';
-import { signInWithGooglePopup, signOutFirebaseGoogle } from '../lib/firebaseAuth.ts';
+import {
+  getActiveFirebaseIdToken,
+  getCachedGoogleAccessToken,
+  signInWithGooglePopup,
+  signOutFirebaseGoogle,
+} from '../lib/firebaseAuth.ts';
 
 export interface OAuthSheetInfo {
   spreadsheetId: string;
@@ -73,6 +79,57 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const applyAuthSuccess = useCallback(
+    (res: {
+      user: SessionUser;
+      sessionToken?: string;
+      csrfToken?: string;
+      settings?: AppSettings | null;
+      storage?: StorageDiagnostics;
+    }) => {
+      setInMemoryAuthTokens(res.sessionToken, res.csrfToken);
+      setUser(res.user);
+      if (res.settings !== undefined) {
+        setSettings(res.settings);
+      }
+      if (res.storage) {
+        setConfig((prev) => (prev ? { ...prev, authenticated: true, storage: res.storage! } : prev));
+      }
+      void refreshNotificationsCount();
+    },
+    [refreshNotificationsCount]
+  );
+
+  const tryRestoreFirebaseSession = useCallback(async (): Promise<boolean> => {
+    try {
+      const fbToken = await getActiveFirebaseIdToken();
+      if (!fbToken) return false;
+      const oauthAccessToken = getCachedGoogleAccessToken() || undefined;
+      const res = await apiRequest<{
+        user: SessionUser;
+        sessionToken?: string;
+        csrfToken?: string;
+        settings?: AppSettings | null;
+        storage?: StorageDiagnostics;
+      }>(
+        '/api/auth/google',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            firebaseIdToken: fbToken,
+            oauthAccessToken,
+          }),
+        },
+        false
+      );
+      applyAuthSuccess(res);
+      return true;
+    } catch {
+      await signOutFirebaseGoogle();
+      return false;
+    }
+  }, [applyAuthSuccess]);
+
   const refreshSession = useCallback(async () => {
     try {
       const cfg = await apiRequest<AuthConfig>('/api/auth/config');
@@ -83,6 +140,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(me.user);
         setSettings(me.settings);
         await refreshNotificationsCount();
+      } else if (cfg.firebaseGoogleAuthEnabled && (await tryRestoreFirebaseSession())) {
+        // Session seamlessly restored from active Firebase Google sign-in
       } else {
         clearInMemoryAuthTokens();
         setUser(null);
@@ -93,36 +152,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [refreshNotificationsCount]);
+  }, [refreshNotificationsCount, tryRestoreFirebaseSession]);
 
   useEffect(() => {
+    setSessionRefresher(() => tryRestoreFirebaseSession());
     setUnauthorizedHandler(() => {
       clearInMemoryAuthTokens();
       setUser(null);
       setUnreadNotifications(0);
     });
     void refreshSession();
-    return () => setUnauthorizedHandler(null);
-  }, [refreshSession]);
+    return () => {
+      setUnauthorizedHandler(null);
+      setSessionRefresher(null);
+    };
+  }, [refreshSession, tryRestoreFirebaseSession]);
 
   const loginWithGoogleCredential = async (credential: string, loginScope: UserRole = 'ADMIN') => {
-    const res = await apiRequest<{ user: SessionUser; sessionToken?: string; csrfToken?: string }>(
-      '/api/auth/google',
-      {
-        method: 'POST',
-        body: JSON.stringify({ credential, loginScope }),
-      }
-    );
-    setInMemoryAuthTokens(res.sessionToken, res.csrfToken);
-    setUser(res.user);
-    await refreshSession();
+    const res = await apiRequest<{
+      user: SessionUser;
+      sessionToken?: string;
+      csrfToken?: string;
+      settings?: AppSettings | null;
+      storage?: StorageDiagnostics;
+    }>('/api/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({ credential, loginScope }),
+    });
+    applyAuthSuccess(res);
   };
 
   const loginWithGooglePopup = async (loginScope: UserRole = 'ADMIN') => {
     const tokens = await signInWithGooglePopup(config?.allowedDomain || 'lazuardi.sch.id');
-    const res = await apiRequest<{ user: SessionUser; sessionToken?: string; csrfToken?: string }>(
-      '/api/auth/google',
-      {
+    try {
+      const res = await apiRequest<{
+        user: SessionUser;
+        sessionToken?: string;
+        csrfToken?: string;
+        settings?: AppSettings | null;
+        storage?: StorageDiagnostics;
+      }>('/api/auth/google', {
         method: 'POST',
         body: JSON.stringify({
           credential: tokens.idToken,
@@ -130,43 +199,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           oauthAccessToken: tokens.oauthAccessToken,
           loginScope,
         }),
-      }
-    );
-    setInMemoryAuthTokens(res.sessionToken, res.csrfToken);
-    setUser(res.user);
-    await refreshSession();
+      });
+      applyAuthSuccess(res);
+    } catch (err) {
+      await signOutFirebaseGoogle();
+      throw err;
+    }
   };
 
   const reauthorizeGoogleWorkspace = async (): Promise<string | null> => {
     const tokens = await signInWithGooglePopup(config?.allowedDomain || 'lazuardi.sch.id');
-    const res = await apiRequest<{ user: SessionUser; sessionToken?: string; csrfToken?: string }>(
-      '/api/auth/google',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          credential: tokens.idToken,
-          firebaseIdToken: tokens.firebaseIdToken,
-          oauthAccessToken: tokens.oauthAccessToken,
-          loginScope: user?.role || 'ADMIN',
-        }),
-      }
-    );
-    setInMemoryAuthTokens(res.sessionToken, res.csrfToken);
-    setUser(res.user);
-    await refreshSession();
+    const res = await apiRequest<{
+      user: SessionUser;
+      sessionToken?: string;
+      csrfToken?: string;
+      settings?: AppSettings | null;
+      storage?: StorageDiagnostics;
+    }>('/api/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({
+        credential: tokens.idToken,
+        firebaseIdToken: tokens.firebaseIdToken,
+        oauthAccessToken: tokens.oauthAccessToken,
+        loginScope: user?.role || 'ADMIN',
+      }),
+    });
+    applyAuthSuccess(res);
     return tokens.oauthAccessToken || null;
   };
 
   const loginWithPreviewSession = async (params: { email: string; name: string; role?: UserRole }) => {
-    const res = await apiRequest<{ user: SessionUser; sessionToken?: string; csrfToken?: string }>(
-      '/api/auth/preview-session',
-      {
-        method: 'POST',
-        body: JSON.stringify(params),
-      }
-    );
-    setInMemoryAuthTokens(res.sessionToken, res.csrfToken);
-    setUser(res.user);
+    const res = await apiRequest<{
+      user: SessionUser;
+      sessionToken?: string;
+      csrfToken?: string;
+      settings?: AppSettings | null;
+      storage?: StorageDiagnostics;
+    }>('/api/auth/preview-session', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    applyAuthSuccess(res);
     await refreshSession();
   };
 

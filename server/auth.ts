@@ -29,6 +29,48 @@ function pruneExpiredOAuthTokens() {
   }
 }
 
+interface FirebaseAppletConfig {
+  projectId?: string;
+  apiKey?: string;
+  oAuthClientId?: string;
+}
+
+let cachedFirebaseConfig: FirebaseAppletConfig | null | undefined;
+export function getFirebaseAppletConfig(): FirebaseAppletConfig | null {
+  if (cachedFirebaseConfig !== undefined) return cachedFirebaseConfig;
+  const candidates = [
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(path.dirname(new URL(import.meta.url).pathname), '../firebase-applet-config.json'),
+  ];
+  for (const configPath of candidates) {
+    try {
+      if (fs.existsSync(configPath)) {
+        const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as FirebaseAppletConfig;
+        cachedFirebaseConfig = {
+          projectId: process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || parsed.projectId,
+          apiKey: process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || parsed.apiKey,
+          oAuthClientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || parsed.oAuthClientId,
+        };
+        return cachedFirebaseConfig;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+  const envProjectId = process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
+  const envApiKey = process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY;
+  if (envProjectId || envApiKey) {
+    cachedFirebaseConfig = {
+      projectId: envProjectId,
+      apiKey: envApiKey,
+      oAuthClientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID,
+    };
+    return cachedFirebaseConfig;
+  }
+  cachedFirebaseConfig = null;
+  return null;
+}
+
 let fallbackSecret: string | null = null;
 function getSessionSecret(): string {
   if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16) {
@@ -37,6 +79,33 @@ function getSessionSecret(): string {
   if (fallbackSecret) {
     return fallbackSecret;
   }
+
+  // On Vercel Serverless, multiple stateless containers do not share /tmp or local disk.
+  // Derive a consistent deployment-wide secret across all containers if SESSION_SECRET is unset.
+  if (process.env.VERCEL === '1') {
+    const firebaseCfg = getFirebaseAppletConfig();
+    const entropy = [
+      process.env.VERCEL_PROJECT_ID,
+      process.env.VERCEL_ORG_ID,
+      process.env.VERCEL_GIT_REPO_ID,
+      process.env.GOOGLE_PRIVATE_KEY,
+      process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+      process.env.GEMINI_API_KEY,
+      firebaseCfg?.projectId,
+      firebaseCfg?.apiKey,
+      firebaseCfg?.oAuthClientId,
+      process.env.ALLOWED_WORKSPACE_DOMAIN || 'lazuardi.sch.id',
+    ]
+      .filter(Boolean)
+      .join('|');
+    fallbackSecret = crypto
+      .createHmac('sha256', 'lvbms-vercel-session-signing-key-v1')
+      .update(entropy)
+      .digest('hex');
+    return fallbackSecret;
+  }
+
   const candidates = [
     path.resolve(process.cwd(), '.data', '.session_secret'),
     '/tmp/.lvbms_session_secret',
@@ -129,13 +198,18 @@ function appendPartitionedCookieAttribute(res: Response, isSecure: boolean) {
   res.setHeader('Set-Cookie', updated);
 }
 
+function isSecureRequest(req: Request): boolean {
+  const xfProto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  return Boolean(req.secure || xfProto.includes('https'));
+}
+
 export function setSessionCookies(
   req: Request,
   res: Response,
   user: SessionUser,
   oauthAccessToken?: string
 ): { csrfToken: string; sessionToken: string } {
-  const isSecure = Boolean(req.secure || req.headers['x-forwarded-proto'] === 'https');
+  const isSecure = isSecureRequest(req);
   const sid = crypto.randomUUID();
   if (oauthAccessToken && oauthAccessToken.trim()) {
     pruneExpiredOAuthTokens();
@@ -172,7 +246,7 @@ export function setSessionCookies(
 }
 
 export function clearSessionCookies(req: Request, res: Response) {
-  const isSecure = Boolean(req.secure || req.headers['x-forwarded-proto'] === 'https');
+  const isSecure = isSecureRequest(req);
   res.clearCookie(SESSION_COOKIE, {
     httpOnly: true,
     sameSite: isSecure ? 'none' : 'lax',
@@ -330,47 +404,7 @@ export function requireCsrf(req: Request, res: Response, next: NextFunction) {
   res.status(403).json({ error: 'Validasi keamanan CSRF gagal. Silakan muat ulang halaman.' });
 }
 
-interface FirebaseAppletConfig {
-  projectId?: string;
-  apiKey?: string;
-  oAuthClientId?: string;
-}
-
-let cachedFirebaseConfig: FirebaseAppletConfig | null | undefined;
-export function getFirebaseAppletConfig(): FirebaseAppletConfig | null {
-  if (cachedFirebaseConfig !== undefined) return cachedFirebaseConfig;
-  const candidates = [
-    path.resolve(process.cwd(), 'firebase-applet-config.json'),
-    path.resolve(path.dirname(new URL(import.meta.url).pathname), '../firebase-applet-config.json'),
-  ];
-  for (const configPath of candidates) {
-    try {
-      if (fs.existsSync(configPath)) {
-        const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as FirebaseAppletConfig;
-        cachedFirebaseConfig = {
-          projectId: process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || parsed.projectId,
-          apiKey: process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || parsed.apiKey,
-          oAuthClientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || parsed.oAuthClientId,
-        };
-        return cachedFirebaseConfig;
-      }
-    } catch {
-      // Try next candidate
-    }
-  }
-  const envProjectId = process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
-  const envApiKey = process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY;
-  if (envProjectId || envApiKey) {
-    cachedFirebaseConfig = {
-      projectId: envProjectId,
-      apiKey: envApiKey,
-      oAuthClientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID,
-    };
-    return cachedFirebaseConfig;
-  }
-  cachedFirebaseConfig = null;
-  return null;
-}
+// (getFirebaseAppletConfig is defined above getSessionSecret)
 
 let cachedSecureTokenCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
 async function getFirebaseSecureTokenCerts(): Promise<Record<string, string>> {

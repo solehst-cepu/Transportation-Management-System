@@ -13,6 +13,8 @@ function getCookie(name: string): string | null {
 let inMemorySessionToken: string | null = null;
 let inMemoryCsrfToken: string | null = null;
 let unauthorizedHandler: (() => void) | null = null;
+let sessionRefresher: (() => Promise<boolean>) | null = null;
+let inflightRefresh: Promise<boolean> | null = null;
 
 export function setInMemoryAuthTokens(sessionToken?: string | null, csrfToken?: string | null) {
   inMemorySessionToken = sessionToken || null;
@@ -29,6 +31,10 @@ export function setUnauthorizedHandler(handler: (() => void) | null) {
   unauthorizedHandler = handler;
 }
 
+export function setSessionRefresher(handler: (() => Promise<boolean>) | null) {
+  sessionRefresher = handler;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -37,7 +43,11 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function apiRequest<T>(
+  path: string,
+  options: RequestInit = {},
+  allowAuthRetry = true
+): Promise<T> {
   const method = (options.method || 'GET').toUpperCase();
   const headers = new Headers(options.headers || {});
   if (!headers.has('Content-Type') && options.body && !(options.body instanceof FormData)) {
@@ -70,14 +80,29 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   const data = contentType.includes('application/json') ? await res.json() : await res.text();
 
   if (!res.ok) {
-    if (
-      res.status === 401 &&
-      !path.startsWith('/api/auth/google') &&
-      !path.startsWith('/api/auth/preview-session') &&
-      !path.startsWith('/api/auth/config')
-    ) {
+    const isAuthRoute =
+      path.startsWith('/api/auth/google') ||
+      path.startsWith('/api/auth/preview-session') ||
+      path.startsWith('/api/auth/config');
+
+    if (res.status === 401 && !isAuthRoute) {
+      if (allowAuthRetry && sessionRefresher) {
+        if (!inflightRefresh) {
+          inflightRefresh = sessionRefresher().finally(() => {
+            inflightRefresh = null;
+          });
+        }
+        const refreshed = await inflightRefresh;
+        if (refreshed) {
+          // Strip stale explicit Authorization header so retry uses updated inMemorySessionToken
+          const retryHeaders = new Headers(options.headers || {});
+          retryHeaders.delete('Authorization');
+          return apiRequest<T>(path, { ...options, headers: retryHeaders }, false);
+        }
+      }
       unauthorizedHandler?.();
     }
+
     const msg =
       typeof data === 'object' && data && 'error' in data
         ? String((data as { error: unknown }).error)

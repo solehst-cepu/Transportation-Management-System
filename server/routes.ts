@@ -116,14 +116,25 @@ apiRouter.post('/auth/google', async (req, res) => {
       res.status(400).json({ error: 'Token Google SSO wajib dikirim.' });
       return;
     }
-    const user = await verifyGoogleSsoAndResolveUser({
-      credential: token,
-      firebaseIdToken,
-      oauthAccessToken,
-      loginScope,
-    });
+    const user = await runWithGoogleOAuthToken(
+      oauthAccessToken || getGoogleOAuthTokenFromRequest(req),
+      () =>
+        verifyGoogleSsoAndResolveUser({
+          credential: token,
+          firebaseIdToken,
+          oauthAccessToken,
+          loginScope,
+        })
+    );
     const { csrfToken, sessionToken } = setSessionCookies(req, res, user, oauthAccessToken);
-    res.json({ user, csrfToken, sessionToken, storage: dbStore.getStorageDiagnostics() });
+    const db = await dbStore.getSnapshot();
+    res.json({
+      user,
+      csrfToken,
+      sessionToken,
+      settings: db.SETTINGS[0] || null,
+      storage: dbStore.getStorageDiagnostics(),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Verifikasi Google SSO gagal.';
     const status = msg.startsWith('Akses') ? 403 : 401;
