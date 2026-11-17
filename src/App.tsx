@@ -106,7 +106,7 @@ function AppRoutes() {
         path="/bookings/my"
         element={
           <ProtectedRoute>
-            <BookingsListPage mode="my" />
+            <BookingsListPage key="my" mode="my" />
           </ProtectedRoute>
         }
       />
@@ -114,7 +114,7 @@ function AppRoutes() {
         path="/bookings/history"
         element={
           <ProtectedRoute>
-            <BookingsListPage mode="history" />
+            <BookingsListPage key="history" mode="history" />
           </ProtectedRoute>
         }
       />
@@ -124,7 +124,7 @@ function AppRoutes() {
         path="/bookings/approval"
         element={
           <ProtectedRoute allowedRoles={['ADMIN']}>
-            <BookingsListPage mode="approval" />
+            <BookingsListPage key="approval" mode="approval" />
           </ProtectedRoute>
         }
       />
@@ -132,7 +132,7 @@ function AppRoutes() {
         path="/bookings"
         element={
           <ProtectedRoute allowedRoles={['ADMIN']}>
-            <BookingsListPage mode="all" />
+            <BookingsListPage key="all" mode="all" />
           </ProtectedRoute>
         }
       />

@@ -28,7 +28,7 @@ import {
   pushNotification,
   upsertLinkedExpense,
 } from './businessLogic.ts';
-import { dbStore, runWithGoogleOAuthToken, SHEET_KEYS } from './sheetsStore.ts';
+import { dbStore, runWithGoogleOAuthToken, SHEET_KEYS, SheetsSyncError } from './sheetsStore.ts';
 import {
   Booking,
   BookingStatus,
@@ -217,11 +217,12 @@ apiRouter.get('/dashboard/summary', requireAuth, async (req: AuthedRequest, res:
   const today = getTodayWibIsoDate();
 
   if (user.role === 'USER') {
+    const userEmailNorm = user.email.trim().toLowerCase();
     const myBookings = db.BOOKINGS.filter(
-      (b) => b.requester_email.toLowerCase() === user.email.toLowerCase()
+      (b) => String(b.requester_email || '').trim().toLowerCase() === userEmailNorm
     );
     const myNotifications = db.NOTIFICATIONS.filter(
-      (n) => n.recipient_email.toLowerCase() === user.email.toLowerCase()
+      (n) => String(n.recipient_email || '').trim().toLowerCase() === userEmailNorm
     );
 
     res.json({
@@ -1086,16 +1087,28 @@ function sanitizeBookingForUser(db: Awaited<ReturnType<typeof dbStore.getSnapsho
   };
 }
 
+function sendMutationError(res: Response, err: unknown, fallback: string) {
+  if (err instanceof SheetsSyncError) {
+    res.status(err.status).json({ error: err.message, code: err.code });
+    return;
+  }
+  res.status(400).json({ error: err instanceof Error ? err.message : fallback });
+}
+
 apiRouter.get('/bookings', requireAuth, async (req: AuthedRequest, res: Response) => {
   const db = await dbStore.getSnapshot();
   const user = req.sessionUser!;
+  const userEmailNorm = user.email.trim().toLowerCase();
   const rows =
     user.role === 'ADMIN'
       ? db.BOOKINGS
-      : db.BOOKINGS.filter((b) => b.requester_email.toLowerCase() === user.email.toLowerCase());
+      : db.BOOKINGS.filter(
+          (b) => String(b.requester_email || '').trim().toLowerCase() === userEmailNorm
+        );
 
   res.json({
     bookings: rows.map((b) => sanitizeBookingForUser(db, b)),
+    storage: dbStore.getStorageDiagnostics(),
   });
 });
 
@@ -1115,7 +1128,10 @@ apiRouter.get('/bookings/:id', requireAuth, async (req: AuthedRequest, res: Resp
     res.status(404).json({ error: 'Pengajuan tidak ditemukan.' });
     return;
   }
-  if (user.role !== 'ADMIN' && booking.requester_email.toLowerCase() !== user.email.toLowerCase()) {
+  if (
+    user.role !== 'ADMIN' &&
+    String(booking.requester_email || '').trim().toLowerCase() !== user.email.trim().toLowerCase()
+  ) {
     res.status(403).json({ error: 'Anda tidak berhak melihat pengajuan pengguna lain.' });
     return;
   }
@@ -1148,11 +1164,13 @@ apiRouter.post('/bookings/internal', requireAuth, async (req: AuthedRequest, res
       throw new Error('Waktu kembali harus lebih akhir daripada waktu keberangkatan.');
     }
 
-    const created = await dbStore.mutate(['BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'], (db) => {
-      const bookingNumber = nextSequentialCode(
-        'BKG-INT',
-        db.BOOKINGS.filter((b) => b.booking_kind === 'INTERNAL').map((b) => b.booking_number)
-      );
+    const created = await dbStore.mutate(
+      ['BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'],
+      (db) => {
+        const bookingNumber = nextSequentialCode(
+          'BKG-INT',
+          db.BOOKINGS.filter((b) => b.booking_kind === 'INTERNAL').map((b) => b.booking_number)
+        );
       const booking: Booking = {
         booking_id: crypto.randomUUID(),
         booking_number: bookingNumber,
@@ -1222,12 +1240,17 @@ apiRouter.post('/bookings/internal', requireAuth, async (req: AuthedRequest, res
         booking.booking_id,
         `Buat pengajuan internal ${booking.booking_number} (${initialStatus})`
       );
-      return booking;
-    });
+        return booking;
+      },
+      { requireRemoteSync: true }
+    );
 
-    res.status(201).json({ booking: created });
+    res.status(201).json({
+      booking: created,
+      storage: dbStore.getStorageDiagnostics(),
+    });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal membuat pengajuan.' });
+    sendMutationError(res, err, 'Gagal membuat pengajuan.');
   }
 });
 
@@ -1245,11 +1268,13 @@ apiRouter.post('/bookings/external', requireAuth, async (req: AuthedRequest, res
       throw new Error('Waktu kembali harus lebih akhir daripada waktu keberangkatan.');
     }
 
-    const created = await dbStore.mutate(['BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'], (db) => {
-      const bookingNumber = nextSequentialCode(
-        'BKG-EXT',
-        db.BOOKINGS.filter((b) => b.booking_kind === 'EXTERNAL').map((b) => b.booking_number)
-      );
+    const created = await dbStore.mutate(
+      ['BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'],
+      (db) => {
+        const bookingNumber = nextSequentialCode(
+          'BKG-EXT',
+          db.BOOKINGS.filter((b) => b.booking_kind === 'EXTERNAL').map((b) => b.booking_number)
+        );
       const students = Number(req.body.student_count || 0);
       const companions = Number(req.body.companion_count || 0);
       const booking: Booking = {
@@ -1321,12 +1346,17 @@ apiRouter.post('/bookings/external', requireAuth, async (req: AuthedRequest, res
         booking.booking_id,
         `Buat pengajuan eksternal ${booking.booking_number} (${initialStatus})`
       );
-      return booking;
-    });
+        return booking;
+      },
+      { requireRemoteSync: true }
+    );
 
-    res.status(201).json({ booking: created });
+    res.status(201).json({
+      booking: created,
+      storage: dbStore.getStorageDiagnostics(),
+    });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal membuat pengajuan eksternal.' });
+    sendMutationError(res, err, 'Gagal membuat pengajuan eksternal.');
   }
 });
 
@@ -1334,63 +1364,78 @@ apiRouter.post('/bookings/external', requireAuth, async (req: AuthedRequest, res
 apiRouter.put('/bookings/:id', requireAuth, async (req: AuthedRequest, res: Response) => {
   const user = req.sessionUser!;
   try {
-    const updated = await dbStore.mutate(['BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'], (db) => {
-      const idx = db.BOOKINGS.findIndex((b) => b.booking_id === req.params.id);
-      if (idx === -1) throw new Error('Pengajuan tidak ditemukan.');
-      const existing = db.BOOKINGS[idx];
+    const updated = await dbStore.mutate(
+      ['BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'],
+      (db) => {
+        const idx = db.BOOKINGS.findIndex((b) => b.booking_id === req.params.id);
+        if (idx === -1) throw new Error('Pengajuan tidak ditemukan.');
+        const existing = db.BOOKINGS[idx];
 
-      if (user.role !== 'ADMIN') {
-        if (existing.requester_email.toLowerCase() !== user.email.toLowerCase()) {
-          throw new Error('Tidak memiliki izin mengubah pengajuan ini.');
+        if (user.role !== 'ADMIN') {
+          if (
+            String(existing.requester_email || '').trim().toLowerCase() !==
+            user.email.trim().toLowerCase()
+          ) {
+            throw new Error('Tidak memiliki izin mengubah pengajuan ini.');
+          }
+          if (!['Draft', 'Perlu Revisi'].includes(existing.status)) {
+            throw new Error('Pengajuan hanya dapat direvisi saat berstatus Draft atau Perlu Revisi.');
+          }
         }
-        if (!['Draft', 'Perlu Revisi'].includes(existing.status)) {
-          throw new Error('Pengajuan hanya dapat direvisi saat berstatus Draft atau Perlu Revisi.');
+
+        const { resubmit: resubmitFlag, ...bodyPatch } = (req.body || {}) as Record<string, unknown>;
+        const resubmit = Boolean(resubmitFlag);
+        const nextStatus: BookingStatus = resubmit ? 'Diajukan' : existing.status;
+        const now = new Date().toISOString();
+
+        const merged: Booking = {
+          ...existing,
+          ...bodyPatch,
+          booking_id: existing.booking_id,
+          booking_number: existing.booking_number,
+          requester_id: existing.requester_id,
+          requester_email: existing.requester_email,
+          status: nextStatus,
+          updated_at: now,
+        };
+        if (resubmit) {
+          merged.approval_history = [
+            ...existing.approval_history,
+            {
+              actor_email: user.email,
+              actor_name: user.name,
+              timestamp: now,
+              from_status: existing.status,
+              to_status: 'Diajukan',
+              notes: 'Pengajuan direvisi dan dikirim ulang ke GA.',
+            },
+          ];
+          pushNotification(db, {
+            recipient_email: 'ALL_ADMINS',
+            recipient_role: 'ALL_ADMINS',
+            title: `Revisi Pengajuan ${merged.booking_number}`,
+            message: `${user.name} telah memperbarui pengajuan ${merged.activity_name}.`,
+            link: '/bookings/approval',
+            severity: 'info',
+          });
         }
-      }
 
-      const resubmit = Boolean(req.body.resubmit);
-      const nextStatus: BookingStatus = resubmit ? 'Diajukan' : existing.status;
-      const now = new Date().toISOString();
-
-      const merged: Booking = {
-        ...existing,
-        ...req.body,
-        booking_id: existing.booking_id,
-        booking_number: existing.booking_number,
-        requester_id: existing.requester_id,
-        requester_email: existing.requester_email,
-        status: nextStatus,
-        updated_at: now,
-      };
-      if (resubmit) {
-        merged.approval_history = [
-          ...existing.approval_history,
-          {
-            actor_email: user.email,
-            actor_name: user.name,
-            timestamp: now,
-            from_status: existing.status,
-            to_status: 'Diajukan',
-            notes: 'Pengajuan direvisi dan dikirim ulang ke GA.',
-          },
-        ];
-        pushNotification(db, {
-          recipient_email: 'ALL_ADMINS',
-          recipient_role: 'ALL_ADMINS',
-          title: `Revisi Pengajuan ${merged.booking_number}`,
-          message: `${user.name} telah memperbarui pengajuan ${merged.activity_name}.`,
-          link: '/bookings/approval',
-          severity: 'info',
-        });
-      }
-
-      db.BOOKINGS[idx] = merged;
-      appendAuditLog(db, user, 'UPDATE_BOOKING', 'BOOKINGS', merged.booking_id, `Update pengajuan ${merged.booking_number}`);
-      return sanitizeBookingForUser(db, merged);
-    });
+        db.BOOKINGS[idx] = merged;
+        appendAuditLog(
+          db,
+          user,
+          'UPDATE_BOOKING',
+          'BOOKINGS',
+          merged.booking_id,
+          `Update pengajuan ${merged.booking_number}`
+        );
+        return sanitizeBookingForUser(db, merged);
+      },
+      { requireRemoteSync: true }
+    );
     res.json({ booking: updated });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal memperbarui pengajuan.' });
+    sendMutationError(res, err, 'Gagal memperbarui pengajuan.');
   }
 });
 
@@ -1404,102 +1449,117 @@ apiRouter.post('/bookings/:id/transition', requireAuth, async (req: AuthedReques
   };
 
   try {
-    const updated = await dbStore.mutate(['BOOKINGS', 'NOTIFICATIONS', 'VEHICLE_HISTORY', 'AUDIT_LOGS'], (db) => {
-      const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
-      if (!booking) throw new Error('Pengajuan tidak ditemukan.');
+    const updated = await dbStore.mutate(
+      ['BOOKINGS', 'NOTIFICATIONS', 'VEHICLE_HISTORY', 'AUDIT_LOGS'],
+      (db) => {
+        const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
+        if (!booking) throw new Error('Pengajuan tidak ditemukan.');
 
-      if (user.role !== 'ADMIN') {
-        if (booking.requester_email.toLowerCase() !== user.email.toLowerCase()) {
-          throw new Error('Akses ditolak.');
+        if (user.role !== 'ADMIN') {
+          if (
+            String(booking.requester_email || '').trim().toLowerCase() !==
+            user.email.trim().toLowerCase()
+          ) {
+            throw new Error('Akses ditolak.');
+          }
+          const userAllowed =
+            (target_status === 'Diajukan' && ['Draft', 'Perlu Revisi'].includes(booking.status)) ||
+            (target_status === 'Dibatalkan' &&
+              !['Dalam Perjalanan', 'Selesai', 'Ditolak', 'Dibatalkan'].includes(booking.status));
+          if (!userAllowed) {
+            throw new Error(
+              'User hanya dapat mengajukan ulang atau membatalkan sebelum perjalanan dimulai.'
+            );
+          }
         }
-        const userAllowed =
-          (target_status === 'Diajukan' && ['Draft', 'Perlu Revisi'].includes(booking.status)) ||
-          (target_status === 'Dibatalkan' && !['Dalam Perjalanan', 'Selesai', 'Ditolak', 'Dibatalkan'].includes(booking.status));
-        if (!userAllowed) {
-          throw new Error('User hanya dapat mengajukan ulang atau membatalkan sebelum perjalanan dimulai.');
+
+        if (target_status === 'Ditolak' && (!rejection_reason || !rejection_reason.trim())) {
+          throw new Error('Alasan penolakan wajib dicantumkan.');
         }
-      }
+        if (target_status === 'Dijadwalkan' && booking.allocated_vehicle_ids.length === 0) {
+          throw new Error('Status Dijadwalkan memerlukan alokasi kendaraan terlebih dahulu.');
+        }
 
-      if (target_status === 'Ditolak' && (!rejection_reason || !rejection_reason.trim())) {
-        throw new Error('Alasan penolakan wajib dicantumkan.');
-      }
-      if (target_status === 'Dijadwalkan' && booking.allocated_vehicle_ids.length === 0) {
-        throw new Error('Status Dijadwalkan memerlukan alokasi kendaraan terlebih dahulu.');
-      }
+        const now = new Date().toISOString();
+        const prevStatus = booking.status;
+        booking.status = target_status;
+        booking.updated_at = now;
 
-      const now = new Date().toISOString();
-      const prevStatus = booking.status;
-      booking.status = target_status;
-      booking.updated_at = now;
+        if (target_status === 'Ditolak') {
+          booking.rejection_reason = rejection_reason || '';
+        }
+        if (target_status === 'Perlu Revisi') {
+          booking.revision_notes = notes || '';
+        }
+        if (target_status === 'Disetujui') {
+          booking.approved_by = user.email;
+          booking.approved_at = now;
+        }
 
-      if (target_status === 'Ditolak') {
-        booking.rejection_reason = rejection_reason || '';
-      }
-      if (target_status === 'Perlu Revisi') {
-        booking.revision_notes = notes || '';
-      }
-      if (target_status === 'Disetujui') {
-        booking.approved_by = user.email;
-        booking.approved_at = now;
-      }
+        booking.approval_history.push({
+          actor_email: user.email,
+          actor_name: user.name,
+          timestamp: now,
+          from_status: prevStatus,
+          to_status: target_status,
+          notes: notes || rejection_reason || `Perubahan status ke ${target_status}`,
+        });
 
-      booking.approval_history.push({
-        actor_email: user.email,
-        actor_name: user.name,
-        timestamp: now,
-        from_status: prevStatus,
-        to_status: target_status,
-        notes: notes || rejection_reason || `Perubahan status ke ${target_status}`,
-      });
+        if (target_status === 'Selesai' && booking.allocated_vehicle_ids.length > 0) {
+          for (const vid of booking.allocated_vehicle_ids) {
+            appendVehicleHistory(db, {
+              vehicle_id: vid,
+              activity_type: 'Penggunaan',
+              actor: user,
+              summary: `Perjalanan selesai: ${booking.booking_number} — ${booking.activity_name} (${booking.destination_location})`,
+              reference_id: booking.booking_id,
+            });
+          }
+        }
 
-      if (target_status === 'Selesai' && booking.allocated_vehicle_ids.length > 0) {
-        for (const vid of booking.allocated_vehicle_ids) {
-          appendVehicleHistory(db, {
-            vehicle_id: vid,
-            activity_type: 'Penggunaan',
-            actor: user,
-            summary: `Perjalanan selesai: ${booking.booking_number} — ${booking.activity_name} (${booking.destination_location})`,
-            reference_id: booking.booking_id,
+        if (user.role === 'ADMIN') {
+          pushNotification(db, {
+            recipient_email: booking.requester_email,
+            recipient_role: 'USER',
+            title: `Pembaruan Status ${booking.booking_number}: ${target_status}`,
+            message:
+              rejection_reason ||
+              notes ||
+              `Pengajuan "${booking.activity_name}" kini berstatus ${target_status}.`,
+            link: '/bookings/my',
+            severity:
+              target_status === 'Ditolak'
+                ? 'critical'
+                : target_status === 'Disetujui' || target_status === 'Selesai'
+                  ? 'success'
+                  : 'info',
+          });
+        } else {
+          pushNotification(db, {
+            recipient_email: 'ALL_ADMINS',
+            recipient_role: 'ALL_ADMINS',
+            title: `${booking.booking_number} -> ${target_status}`,
+            message: `${user.name} mengubah status ${booking.activity_name} menjadi ${target_status}.`,
+            link: '/bookings/approval',
+            severity: target_status === 'Dibatalkan' ? 'warning' : 'info',
           });
         }
-      }
 
-      if (user.role === 'ADMIN') {
-        pushNotification(db, {
-          recipient_email: booking.requester_email,
-          recipient_role: 'USER',
-          title: `Pembaruan Status ${booking.booking_number}: ${target_status}`,
-          message:
-            rejection_reason ||
-            notes ||
-            `Pengajuan "${booking.activity_name}" kini berstatus ${target_status}.`,
-          link: '/bookings/my',
-          severity: target_status === 'Ditolak' ? 'critical' : target_status === 'Disetujui' || target_status === 'Selesai' ? 'success' : 'info',
-        });
-      } else {
-        pushNotification(db, {
-          recipient_email: 'ALL_ADMINS',
-          recipient_role: 'ALL_ADMINS',
-          title: `${booking.booking_number} -> ${target_status}`,
-          message: `${user.name} mengubah status ${booking.activity_name} menjadi ${target_status}.`,
-          link: '/bookings/approval',
-          severity: target_status === 'Dibatalkan' ? 'warning' : 'info',
-        });
-      }
-
-      appendAuditLog(
-        db,
-        user,
-        'BOOKING_TRANSITION',
-        'BOOKINGS',
-        booking.booking_id,
-        `${booking.booking_number}: ${prevStatus} -> ${target_status}`
-      );
-      return sanitizeBookingForUser(db, booking);
-    });
+        appendAuditLog(
+          db,
+          user,
+          'BOOKING_TRANSITION',
+          'BOOKINGS',
+          booking.booking_id,
+          `${booking.booking_number}: ${prevStatus} -> ${target_status}`
+        );
+        return sanitizeBookingForUser(db, booking);
+      },
+      { requireRemoteSync: true }
+    );
     res.json({ booking: updated });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal mengubah status.' });
+    sendMutationError(res, err, 'Gagal mengubah status.');
   }
 });
 
@@ -1516,181 +1576,189 @@ apiRouter.post('/bookings/:id/allocate', requireAuth, requireRole('ADMIN'), asyn
       throw new Error('Pilih minimal satu kendaraan operasional sekolah untuk dialokasikan.');
     }
 
-    const updated = await dbStore.mutate(['BOOKINGS', 'NOTIFICATIONS', 'VEHICLE_HISTORY', 'AUDIT_LOGS'], (db) => {
-      const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
-      if (!booking) throw new Error('Pengajuan tidak ditemukan.');
-      if (booking.booking_kind !== 'INTERNAL') {
-        throw new Error('Alokasi kendaraan sekolah hanya berlaku untuk pemesanan kendaraan internal.');
-      }
-
-      const selectedVehicleTypeIds: string[] = [];
-      let totalAllocatedSeats = 0;
-
-      for (const vid of vehicle_ids) {
-        const vehicle = db.VEHICLES.find((v) => v.vehicle_id === vid);
-        if (!vehicle) throw new Error(`Kendaraan ${vid} tidak ditemukan.`);
-
-        const blockers = getVehicleBlockReasons(
-          db,
-          vehicle,
-          booking.departure_at,
-          booking.return_at,
-          booking.booking_id
-        );
-        if (blockers.length > 0) {
-          throw new Error(`Kendaraan ${vehicle.plate_number} (${vehicle.vehicle_name}) tidak dapat dialokasikan: ${blockers.join(' ')}`);
+    const updated = await dbStore.mutate(
+      ['BOOKINGS', 'NOTIFICATIONS', 'VEHICLE_HISTORY', 'AUDIT_LOGS'],
+      (db) => {
+        const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
+        if (!booking) throw new Error('Pengajuan tidak ditemukan.');
+        if (booking.booking_kind !== 'INTERNAL') {
+          throw new Error('Alokasi kendaraan sekolah hanya berlaku untuk pemesanan kendaraan internal.');
         }
-        selectedVehicleTypeIds.push(vehicle.vehicle_type_id);
-        totalAllocatedSeats += Number(vehicle.passenger_capacity || 0);
-      }
 
-      if (booking.needs_driver && (!Array.isArray(driver_ids) || driver_ids.length === 0)) {
-        throw new Error('Pemesanan ini membutuhkan pengemudi. Silakan pilih pengemudi.');
-      }
+        const selectedVehicleTypeIds: string[] = [];
+        let totalAllocatedSeats = 0;
 
-      for (const did of driver_ids || []) {
-        const driver = db.DRIVERS.find((d) => d.driver_id === did);
-        if (!driver) throw new Error(`Pengemudi ${did} tidak ditemukan.`);
+        for (const vid of vehicle_ids) {
+          const vehicle = db.VEHICLES.find((v) => v.vehicle_id === vid);
+          if (!vehicle) throw new Error(`Kendaraan ${vid} tidak ditemukan.`);
 
-        const dBlockers = getDriverBlockReasons(
-          db,
-          driver,
-          selectedVehicleTypeIds,
-          booking.departure_at,
-          booking.return_at,
-          booking.booking_id
-        );
-        if (dBlockers.length > 0) {
-          throw new Error(`Pengemudi ${driver.full_name} tidak dapat dialokasikan: ${dBlockers.join(' ')}`);
+          const blockers = getVehicleBlockReasons(
+            db,
+            vehicle,
+            booking.departure_at,
+            booking.return_at,
+            booking.booking_id
+          );
+          if (blockers.length > 0) {
+            throw new Error(`Kendaraan ${vehicle.plate_number} (${vehicle.vehicle_name}) tidak dapat dialokasikan: ${blockers.join(' ')}`);
+          }
+          selectedVehicleTypeIds.push(vehicle.vehicle_type_id);
+          totalAllocatedSeats += Number(vehicle.passenger_capacity || 0);
         }
-      }
 
-      const now = new Date().toISOString();
-      const prevStatus = booking.status;
-      booking.allocated_vehicle_ids = vehicle_ids;
-      booking.allocated_driver_ids = driver_ids || [];
-      booking.status = 'Dijadwalkan';
-      booking.approved_by = booking.approved_by || req.sessionUser!.email;
-      booking.approved_at = booking.approved_at || now;
-      booking.updated_at = now;
+        if (booking.needs_driver && (!Array.isArray(driver_ids) || driver_ids.length === 0)) {
+          throw new Error('Pemesanan ini membutuhkan pengemudi. Silakan pilih pengemudi.');
+        }
 
-      const vehicleLabels = vehicle_ids
-        .map((id) => db.VEHICLES.find((v) => v.vehicle_id === id))
-        .filter(Boolean)
-        .map((v) => `${v!.vehicle_name} (${v!.plate_number})`)
-        .join(', ');
-      const driverLabels = (driver_ids || [])
-        .map((id) => db.DRIVERS.find((d) => d.driver_id === id)?.full_name)
-        .filter(Boolean)
-        .join(', ');
+        for (const did of driver_ids || []) {
+          const driver = db.DRIVERS.find((d) => d.driver_id === did);
+          if (!driver) throw new Error(`Pengemudi ${did} tidak ditemukan.`);
 
-      booking.approval_history.push({
-        actor_email: req.sessionUser!.email,
-        actor_name: req.sessionUser!.name,
-        timestamp: now,
-        from_status: prevStatus,
-        to_status: 'Dijadwalkan',
-        notes:
-          notes ||
-          `Alokasi kendaraan: ${vehicleLabels}${driverLabels ? ` | Pengemudi: ${driverLabels}` : ''}${
-            totalAllocatedSeats < booking.passenger_count ? ' (Catatan: kapasitas perlu perhatian)' : ''
-          }`,
-      });
+          const dBlockers = getDriverBlockReasons(
+            db,
+            driver,
+            selectedVehicleTypeIds,
+            booking.departure_at,
+            booking.return_at,
+            booking.booking_id
+          );
+          if (dBlockers.length > 0) {
+            throw new Error(`Pengemudi ${driver.full_name} tidak dapat dialokasikan: ${dBlockers.join(' ')}`);
+          }
+        }
 
-      for (const vid of vehicle_ids) {
-        appendVehicleHistory(db, {
-          vehicle_id: vid,
-          activity_type: 'Penggunaan',
-          actor: req.sessionUser!,
-          summary: `Dijadwalkan untuk ${booking.booking_number}: ${booking.activity_name} (${booking.departure_at})`,
-          reference_id: booking.booking_id,
+        const now = new Date().toISOString();
+        const prevStatus = booking.status;
+        booking.allocated_vehicle_ids = vehicle_ids;
+        booking.allocated_driver_ids = driver_ids || [];
+        booking.status = 'Dijadwalkan';
+        booking.approved_by = booking.approved_by || req.sessionUser!.email;
+        booking.approved_at = booking.approved_at || now;
+        booking.updated_at = now;
+
+        const vehicleLabels = vehicle_ids
+          .map((id) => db.VEHICLES.find((v) => v.vehicle_id === id))
+          .filter(Boolean)
+          .map((v) => `${v!.vehicle_name} (${v!.plate_number})`)
+          .join(', ');
+        const driverLabels = (driver_ids || [])
+          .map((id) => db.DRIVERS.find((d) => d.driver_id === id)?.full_name)
+          .filter(Boolean)
+          .join(', ');
+
+        booking.approval_history.push({
+          actor_email: req.sessionUser!.email,
+          actor_name: req.sessionUser!.name,
+          timestamp: now,
+          from_status: prevStatus,
+          to_status: 'Dijadwalkan',
+          notes:
+            notes ||
+            `Alokasi kendaraan: ${vehicleLabels}${driverLabels ? ` | Pengemudi: ${driverLabels}` : ''}${
+              totalAllocatedSeats < booking.passenger_count ? ' (Catatan: kapasitas perlu perhatian)' : ''
+            }`,
         });
-      }
 
-      pushNotification(db, {
-        recipient_email: booking.requester_email,
-        recipient_role: 'USER',
-        title: `Kendaraan Dijadwalkan (${booking.booking_number})`,
-        message: `Unit ${vehicleLabels}${driverLabels ? ` dengan pengemudi ${driverLabels}` : ''} telah dialokasikan untuk ${booking.activity_name}.`,
-        link: '/bookings/my',
-        severity: 'success',
-      });
+        for (const vid of vehicle_ids) {
+          appendVehicleHistory(db, {
+            vehicle_id: vid,
+            activity_type: 'Penggunaan',
+            actor: req.sessionUser!,
+            summary: `Dijadwalkan untuk ${booking.booking_number}: ${booking.activity_name} (${booking.departure_at})`,
+            reference_id: booking.booking_id,
+          });
+        }
 
-      appendAuditLog(
-        db,
-        req.sessionUser!,
-        'ALLOCATE_VEHICLE',
-        'BOOKINGS',
-        booking.booking_id,
-        `Alokasi ${booking.booking_number}: ${vehicleLabels}`
-      );
+        pushNotification(db, {
+          recipient_email: booking.requester_email,
+          recipient_role: 'USER',
+          title: `Kendaraan Dijadwalkan (${booking.booking_number})`,
+          message: `Unit ${vehicleLabels}${driverLabels ? ` dengan pengemudi ${driverLabels}` : ''} telah dialokasikan untuk ${booking.activity_name}.`,
+          link: '/bookings/my',
+          severity: 'success',
+        });
 
-      return sanitizeBookingForUser(db, booking);
-    });
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'ALLOCATE_VEHICLE',
+          'BOOKINGS',
+          booking.booking_id,
+          `Alokasi ${booking.booking_number}: ${vehicleLabels}`
+        );
+
+        return sanitizeBookingForUser(db, booking);
+      },
+      { requireRemoteSync: true }
+    );
 
     res.json({ booking: updated });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal mengalokasikan kendaraan.' });
+    sendMutationError(res, err, 'Gagal mengalokasikan kendaraan.');
   }
 });
 
 // External Vendor Quotes & Selection
 apiRouter.post('/bookings/:id/quotes', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
   try {
-    const result = await dbStore.mutate(['VENDOR_QUOTES', 'BOOKINGS', 'AUDIT_LOGS'], (db) => {
-      const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
-      if (!booking) throw new Error('Pengajuan tidak ditemukan.');
-      if (booking.booking_kind !== 'EXTERNAL') throw new Error('Penawaran vendor hanya untuk pemesanan eksternal.');
+    const result = await dbStore.mutate(
+      ['VENDOR_QUOTES', 'BOOKINGS', 'AUDIT_LOGS'],
+      (db) => {
+        const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
+        if (!booking) throw new Error('Pengajuan tidak ditemukan.');
+        if (booking.booking_kind !== 'EXTERNAL') throw new Error('Penawaran vendor hanya untuk pemesanan eksternal.');
 
-      const rentalPrice = Number(req.body.rental_price || 0);
-      const extraCost = Number(req.body.extra_cost || 0);
-      const now = new Date().toISOString();
+        const rentalPrice = Number(req.body.rental_price || 0);
+        const extraCost = Number(req.body.extra_cost || 0);
+        const now = new Date().toISOString();
 
-      const quote = {
-        quote_id: crypto.randomUUID(),
-        booking_id: booking.booking_id,
-        vendor_id: String(req.body.vendor_id || ''),
-        vehicle_type: String(req.body.vehicle_type || booking.external_vehicle_type),
-        capacity: Number(req.body.capacity || 45),
-        unit_count: Number(req.body.unit_count || booking.external_unit_count || 1),
-        vehicle_year: Number(req.body.vehicle_year || new Date().getFullYear()),
-        rental_price: rentalPrice,
-        extra_cost: extraCost,
-        total_cost: rentalPrice + extraCost,
-        facilities: String(req.body.facilities || ''),
-        valid_until: String(req.body.valid_until || ''),
-        notes: String(req.body.notes || ''),
-        verify_vehicle_docs: Boolean(req.body.verify_vehicle_docs),
-        verify_kir: Boolean(req.body.verify_kir),
-        verify_vehicle_condition: Boolean(req.body.verify_vehicle_condition),
-        verify_driver_qualification: Boolean(req.body.verify_driver_qualification),
-        verify_safety_equipment: Boolean(req.body.verify_safety_equipment),
-        verify_school_policy: Boolean(req.body.verify_school_policy),
-        is_selected: false,
-        created_at: now,
-      };
-      db.VENDOR_QUOTES.push(quote);
+        const quote = {
+          quote_id: crypto.randomUUID(),
+          booking_id: booking.booking_id,
+          vendor_id: String(req.body.vendor_id || ''),
+          vehicle_type: String(req.body.vehicle_type || booking.external_vehicle_type),
+          capacity: Number(req.body.capacity || 45),
+          unit_count: Number(req.body.unit_count || booking.external_unit_count || 1),
+          vehicle_year: Number(req.body.vehicle_year || new Date().getFullYear()),
+          rental_price: rentalPrice,
+          extra_cost: extraCost,
+          total_cost: rentalPrice + extraCost,
+          facilities: String(req.body.facilities || ''),
+          valid_until: String(req.body.valid_until || ''),
+          notes: String(req.body.notes || ''),
+          verify_vehicle_docs: Boolean(req.body.verify_vehicle_docs),
+          verify_kir: Boolean(req.body.verify_kir),
+          verify_vehicle_condition: Boolean(req.body.verify_vehicle_condition),
+          verify_driver_qualification: Boolean(req.body.verify_driver_qualification),
+          verify_safety_equipment: Boolean(req.body.verify_safety_equipment),
+          verify_school_policy: Boolean(req.body.verify_school_policy),
+          is_selected: false,
+          created_at: now,
+        };
+        db.VENDOR_QUOTES.push(quote);
 
-      if (['Disetujui', 'Pencarian Vendor', 'Menunggu Penawaran'].includes(booking.status)) {
-        const prev = booking.status;
-        booking.status = 'Penawaran Diterima';
-        booking.updated_at = now;
-        booking.approval_history.push({
-          actor_email: req.sessionUser!.email,
-          actor_name: req.sessionUser!.name,
-          timestamp: now,
-          from_status: prev,
-          to_status: 'Penawaran Diterima',
-          notes: `Mencatat penawaran vendor (${quote.vehicle_type}).`,
-        });
-      }
+        if (['Disetujui', 'Pencarian Vendor', 'Menunggu Penawaran'].includes(booking.status)) {
+          const prev = booking.status;
+          booking.status = 'Penawaran Diterima';
+          booking.updated_at = now;
+          booking.approval_history.push({
+            actor_email: req.sessionUser!.email,
+            actor_name: req.sessionUser!.name,
+            timestamp: now,
+            from_status: prev,
+            to_status: 'Penawaran Diterima',
+            notes: `Mencatat penawaran vendor (${quote.vehicle_type}).`,
+          });
+        }
 
-      appendAuditLog(db, req.sessionUser!, 'ADD_VENDOR_QUOTE', 'VENDOR_QUOTES', quote.quote_id, `Catat penawaran untuk ${booking.booking_number}`);
-      return quote;
-    });
+        appendAuditLog(db, req.sessionUser!, 'ADD_VENDOR_QUOTE', 'VENDOR_QUOTES', quote.quote_id, `Catat penawaran untuk ${booking.booking_number}`);
+        return quote;
+      },
+      { requireRemoteSync: true }
+    );
     res.status(201).json({ quote: result });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal mencatat penawaran vendor.' });
+    sendMutationError(res, err, 'Gagal mencatat penawaran vendor.');
   }
 });
 
@@ -1701,73 +1769,77 @@ apiRouter.post('/bookings/:id/select-vendor', requireAuth, requireRole('ADMIN'),
     notes?: string;
   };
   try {
-    const updated = await dbStore.mutate(['VENDOR_QUOTES', 'BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'], (db) => {
-      const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
-      if (!booking) throw new Error('Pengajuan tidak ditemukan.');
-      const quote = db.VENDOR_QUOTES.find((q) => q.quote_id === quote_id && q.booking_id === booking.booking_id);
-      if (!quote) throw new Error('Penawaran vendor tidak ditemukan.');
+    const updated = await dbStore.mutate(
+      ['VENDOR_QUOTES', 'BOOKINGS', 'NOTIFICATIONS', 'AUDIT_LOGS'],
+      (db) => {
+        const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
+        if (!booking) throw new Error('Pengajuan tidak ditemukan.');
+        const quote = db.VENDOR_QUOTES.find((q) => q.quote_id === quote_id && q.booking_id === booking.booking_id);
+        if (!quote) throw new Error('Penawaran vendor tidak ditemukan.');
 
-      // Enforce mandatory safety & document verification before selecting vendor
-      if (
-        !quote.verify_vehicle_docs ||
-        !quote.verify_vehicle_condition ||
-        !quote.verify_driver_qualification ||
-        !quote.verify_safety_equipment ||
-        !quote.verify_school_policy
-      ) {
-        throw new Error(
-          'Semua poin verifikasi dokumen, kondisi unit, kualifikasi pengemudi, keselamatan, dan kebijakan sekolah harus dicentang sebelum memilih vendor.'
-        );
-      }
-
-      for (const q of db.VENDOR_QUOTES) {
-        if (q.booking_id === booking.booking_id) {
-          q.is_selected = q.quote_id === quote.quote_id;
+        // Enforce mandatory safety & document verification before selecting vendor
+        if (
+          !quote.verify_vehicle_docs ||
+          !quote.verify_vehicle_condition ||
+          !quote.verify_driver_qualification ||
+          !quote.verify_safety_equipment ||
+          !quote.verify_school_policy
+        ) {
+          throw new Error(
+            'Semua poin verifikasi dokumen, kondisi unit, kualifikasi pengemudi, keselamatan, dan kebijakan sekolah harus dicentang sebelum memilih vendor.'
+          );
         }
-      }
 
-      const vendor = db.VENDORS.find((v) => v.vendor_id === quote.vendor_id);
-      const now = new Date().toISOString();
-      const prevStatus = booking.status;
-      const nextStatus: BookingStatus = confirm_booked ? 'Dipesan' : 'Vendor Dipilih';
+        for (const q of db.VENDOR_QUOTES) {
+          if (q.booking_id === booking.booking_id) {
+            q.is_selected = q.quote_id === quote.quote_id;
+          }
+        }
 
-      booking.selected_quote_id = quote.quote_id;
-      booking.selected_vendor_id = quote.vendor_id;
-      booking.status = nextStatus;
-      booking.updated_at = now;
-      booking.approval_history.push({
-        actor_email: req.sessionUser!.email,
-        actor_name: req.sessionUser!.name,
-        timestamp: now,
-        from_status: prevStatus,
-        to_status: nextStatus,
-        notes:
-          notes ||
-          `Memilih vendor ${vendor?.company_name || quote.vendor_id} (${quote.vehicle_type} — Rp ${quote.total_cost.toLocaleString('id-ID')})`,
-      });
+        const vendor = db.VENDORS.find((v) => v.vendor_id === quote.vendor_id);
+        const now = new Date().toISOString();
+        const prevStatus = booking.status;
+        const nextStatus: BookingStatus = confirm_booked ? 'Dipesan' : 'Vendor Dipilih';
 
-      pushNotification(db, {
-        recipient_email: booking.requester_email,
-        recipient_role: 'USER',
-        title: `Vendor ${nextStatus} (${booking.booking_number})`,
-        message: `Vendor ${vendor?.company_name || ''} telah ditetapkan untuk ${booking.activity_name}.`,
-        link: '/bookings/my',
-        severity: 'success',
-      });
+        booking.selected_quote_id = quote.quote_id;
+        booking.selected_vendor_id = quote.vendor_id;
+        booking.status = nextStatus;
+        booking.updated_at = now;
+        booking.approval_history.push({
+          actor_email: req.sessionUser!.email,
+          actor_name: req.sessionUser!.name,
+          timestamp: now,
+          from_status: prevStatus,
+          to_status: nextStatus,
+          notes:
+            notes ||
+            `Memilih vendor ${vendor?.company_name || quote.vendor_id} (${quote.vehicle_type} — Rp ${quote.total_cost.toLocaleString('id-ID')})`,
+        });
 
-      appendAuditLog(
-        db,
-        req.sessionUser!,
-        'SELECT_VENDOR',
-        'BOOKINGS',
-        booking.booking_id,
-        `Pilih vendor ${vendor?.company_name || quote.vendor_id} untuk ${booking.booking_number}`
-      );
-      return sanitizeBookingForUser(db, booking);
-    });
+        pushNotification(db, {
+          recipient_email: booking.requester_email,
+          recipient_role: 'USER',
+          title: `Vendor ${nextStatus} (${booking.booking_number})`,
+          message: `Vendor ${vendor?.company_name || ''} telah ditetapkan untuk ${booking.activity_name}.`,
+          link: '/bookings/my',
+          severity: 'success',
+        });
+
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'SELECT_VENDOR',
+          'BOOKINGS',
+          booking.booking_id,
+          `Pilih vendor ${vendor?.company_name || quote.vendor_id} untuk ${booking.booking_number}`
+        );
+        return sanitizeBookingForUser(db, booking);
+      },
+      { requireRemoteSync: true }
+    );
     res.json({ booking: updated });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal memilih vendor.' });
+    sendMutationError(res, err, 'Gagal memilih vendor.');
   }
 });
 
@@ -2725,6 +2797,45 @@ apiRouter.post(
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal melakukan sinkronisasi Google Sheets.';
+      res.status(400).json({ error: msg });
+    }
+  }
+);
+
+apiRouter.post(
+  '/integrations/google-sheets/share-domain',
+  requireAuth,
+  requireRole('ADMIN'),
+  async (req: AuthedRequest, res: Response) => {
+    const oauthToken = getGoogleOAuthTokenFromRequest(req);
+    if (!oauthToken) {
+      res.status(400).json({
+        error: 'Token Google OAuth (Sheets & Drive) belum tersedia. Silakan otorisasi Google Workspace terlebih dahulu.',
+        needsGoogleReauth: true,
+      });
+      return;
+    }
+
+    try {
+      const shareResult = await dbStore.shareConnectedSpreadsheetWithDomain(oauthToken);
+      await dbStore.mutate(['AUDIT_LOGS'], (db) => {
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'SHARE_GOOGLE_SHEET_DOMAIN',
+          'SYSTEM',
+          shareResult.connection.spreadsheetId,
+          shareResult.shared
+            ? `Membagikan akses tulis Google Sheet ke domain @${shareResult.domain}`
+            : `Percobaan berbagi ke @${shareResult.domain}: ${shareResult.note || 'dibatasi kebijakan domain'}`
+        );
+      });
+      res.json({
+        ...shareResult,
+        diagnostics: dbStore.getStorageDiagnostics(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal membagikan Google Sheet ke domain sekolah.';
       res.status(400).json({ error: msg });
     }
   }

@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Car, Info } from 'lucide-react';
-import { useAuth } from '../context/AuthContext.tsx';
-import { apiRequest } from '../lib/api.ts';
+import { AlertTriangle, Car, Info } from 'lucide-react';
+import { StorageDiagnostics, useAuth } from '../context/AuthContext.tsx';
+import { ApiError, apiRequest } from '../lib/api.ts';
 import { Department, VehicleType } from '../../shared/types.ts';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.tsx';
 import { Input, Label, Select, Textarea } from '../components/ui/input.tsx';
@@ -10,7 +10,7 @@ import { Button } from '../components/ui/button.tsx';
 import { useToast } from '../components/ui/toast.tsx';
 
 export function InternalBookingFormPage() {
-  const { user } = useAuth();
+  const { user, config, reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const navigate = useNavigate();
 
@@ -40,34 +40,73 @@ export function InternalBookingFormPage() {
       apiRequest<{ vehicleTypes: VehicleType[] }>('/api/vehicle-types'),
     ])
       .then(([dRes, vtRes]) => {
+        const internalTypes = vtRes.vehicleTypes.filter((t) => t.category !== 'Eksternal');
         setDepartments(dRes.departments);
-        setVehicleTypes(vtRes.vehicleTypes.filter((t) => t.category !== 'Eksternal'));
+        setVehicleTypes(internalTypes);
         setForm((prev) => ({
           ...prev,
           department_id: prev.department_id || dRes.departments[0]?.department_id || '',
           requested_vehicle_type_id:
-            prev.requested_vehicle_type_id || vtRes.vehicleTypes[0]?.vehicle_type_id || '',
+            prev.requested_vehicle_type_id || internalTypes[0]?.vehicle_type_id || '',
+          pic_name: prev.pic_name || user?.name || '',
+          contact_phone: prev.contact_phone || user?.phone || '',
         }));
       })
       .catch((err) => {
         notify(err instanceof Error ? err.message : 'Gagal memuat data referensi.', 'error');
       });
-  }, [notify]);
+  }, [notify, user?.name, user?.phone]);
 
   const submitForm = async (saveAsDraft: boolean) => {
     setSubmitting(true);
-    try {
-      const res = await apiRequest<{ booking: { booking_number: string } }>('/api/bookings/internal', {
-        method: 'POST',
-        body: JSON.stringify({ ...form, save_as_draft: saveAsDraft }),
-      });
-      notify(
-        saveAsDraft
-          ? `Draft ${res.booking.booking_number} berhasil disimpan.`
-          : `Pengajuan ${res.booking.booking_number} berhasil dikirim ke General Affairs.`,
-        'success'
+    const sendRequest = (extraHeaders?: Record<string, string>) =>
+      apiRequest<{ booking: { booking_number: string }; storage?: StorageDiagnostics }>(
+        '/api/bookings/internal',
+        {
+          method: 'POST',
+          headers: extraHeaders,
+          body: JSON.stringify({ ...form, save_as_draft: saveAsDraft }),
+        }
       );
-      navigate(user?.role === 'ADMIN' ? '/bookings/approval' : '/bookings/my');
+
+    try {
+      let res: { booking: { booking_number: string }; storage?: StorageDiagnostics };
+      try {
+        res = await sendRequest();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const freshToken = await reauthorizeGoogleWorkspace();
+          if (!freshToken) {
+            throw new Error(
+              'Otorisasi Google Sheets dibatalkan. Pengajuan belum disimpan ke database.'
+            );
+          }
+          res = await sendRequest({ 'X-Google-Access-Token': freshToken });
+        } else {
+          throw err;
+        }
+      }
+
+      if (res.storage?.isEphemeralServerless) {
+        notify(
+          `Pengajuan ${res.booking.booking_number} hanya tersimpan sementara di memori container Vercel (/tmp). Minta Admin GA mengaktifkan Google Sheets Service Account di Vercel agar data tersimpan permanen.`,
+          'warning'
+        );
+      } else {
+        notify(
+          saveAsDraft
+            ? `Draft ${res.booking.booking_number} berhasil disimpan.`
+            : `Pengajuan ${res.booking.booking_number} berhasil dikirim ke General Affairs.`,
+          'success'
+        );
+      }
+      navigate(
+        user?.role === 'ADMIN'
+          ? saveAsDraft
+            ? '/bookings'
+            : '/bookings/approval'
+          : '/bookings/my'
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Gagal mengirim pengajuan.', 'error');
     } finally {
@@ -82,6 +121,18 @@ export function InternalBookingFormPage() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
+      {config?.storage.isEphemeralServerless && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 flex items-start gap-3 text-xs text-amber-900">
+          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Peringatan Penyimpanan Vercel: </span>
+            Database Google Sheets terpusat belum dikonfigurasi pada server Vercel ini. Data yang
+            dikirim belum dapat tersinkron antar akun User &amp; Admin sebelum Admin GA mengatur
+            Environment Variables Google Sheets Service Account.
+          </div>
+        </div>
+      )}
+
       <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 flex items-start gap-3 text-xs text-slate-700">
         <Info className="h-4 w-4 text-[#1755CE] shrink-0 mt-0.5" />
         <div>

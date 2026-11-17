@@ -37,9 +37,11 @@ export function setSessionRefresher(handler: (() => Promise<boolean>) | null) {
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -71,6 +73,7 @@ export async function apiRequest<T>(
   }
 
   const res = await fetch(path, {
+    cache: 'no-store',
     ...options,
     headers,
     credentials: 'include',
@@ -107,7 +110,11 @@ export async function apiRequest<T>(
       typeof data === 'object' && data && 'error' in data
         ? String((data as { error: unknown }).error)
         : `Permintaan gagal (${res.status})`;
-    throw new ApiError(msg, res.status);
+    const code =
+      typeof data === 'object' && data && 'code' in data
+        ? String((data as { code: unknown }).code)
+        : undefined;
+    throw new ApiError(msg, res.status, code);
   }
 
   return data as T;

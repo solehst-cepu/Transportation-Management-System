@@ -75,10 +75,29 @@ export const SHEET_KEYS: SheetKey[] = [
   'AUDIT_LOGS',
 ];
 
-const oauthTokenStorage = new AsyncLocalStorage<string | null>();
+interface RequestContextStore {
+  oauthToken: string | null;
+  requestSnapshot?: DatabaseSnapshot;
+}
+
+const requestContextStorage = new AsyncLocalStorage<RequestContextStore>();
 
 export function runWithGoogleOAuthToken<T>(token: string | null, fn: () => T): T {
-  return oauthTokenStorage.run(token, fn);
+  return requestContextStorage.run({ oauthToken: token }, fn);
+}
+
+export class SheetsSyncError extends Error {
+  code: 'GOOGLE_SHEETS_REAUTH_REQUIRED' | 'GOOGLE_SHEET_PERMISSION_DENIED';
+  status: number;
+  constructor(
+    message: string,
+    code: 'GOOGLE_SHEETS_REAUTH_REQUIRED' | 'GOOGLE_SHEET_PERMISSION_DENIED',
+    status = 409
+  ) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
 }
 
 export interface ConnectedSheetMeta {
@@ -89,6 +108,7 @@ export interface ConnectedSheetMeta {
   connectedBy: string;
   lastSyncAt: string;
   lastAuthExpired?: boolean;
+  domainShared?: boolean;
 }
 
 function nowWibIso(): string {
@@ -1234,7 +1254,7 @@ export class LvbmsDataStore {
   }
 
   public getActiveOAuthToken(): string | null {
-    return oauthTokenStorage.getStore() || null;
+    return requestContextStorage.getStore()?.oauthToken || null;
   }
 
   private getOAuthClient(accessToken: string) {
@@ -1249,7 +1269,18 @@ export class LvbmsDataStore {
     return (
       code === 401 ||
       code === 403 ||
-      /invalid_grant|invalid credentials|unauthenticated|insufficient authentication scopes/i.test(msg)
+      /invalid_grant|invalid credentials|unauthenticated|insufficient authentication scopes|permission|caller does not have permission/i.test(
+        msg
+      )
+    );
+  }
+
+  private isGoogleForbiddenError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err || '');
+    const code = (err as { code?: number; status?: number })?.code ?? (err as { status?: number })?.status;
+    return (
+      code === 403 ||
+      /permission|caller does not have permission|forbidden|insufficient authentication scopes/i.test(msg)
     );
   }
 
@@ -1282,12 +1313,15 @@ export class LvbmsDataStore {
     const activeSpreadsheetId = this.sheetsConfigured
       ? process.env.GOOGLE_SHEETS_SPREADSHEET_ID!
       : connectedMeta?.spreadsheetId || null;
+    const isVercel = process.env.VERCEL === '1';
 
     const engine = this.sheetsConfigured
       ? 'Google Sheets API v4 (Service Account)'
       : connectedMeta
         ? 'Google Sheets API v4 (Google Workspace OAuth)'
-        : 'Server Persistent File Ledger';
+        : isVercel
+          ? 'Memori Sementara Vercel (/tmp - Belum Terhubung Sheet)'
+          : 'Server Persistent File Ledger';
 
     return {
       engine,
@@ -1313,6 +1347,10 @@ export class LvbmsDataStore {
         : null,
       oauthSheet: connectedMeta,
       hasActiveOAuthToken,
+      isVercel,
+      hasEnvSpreadsheetId: Boolean(process.env.GOOGLE_SHEETS_SPREADSHEET_ID?.trim()),
+      isEphemeralServerless: Boolean(isVercel && !this.sheetsConfigured && !connectedMeta),
+      needsOAuthReauthForRemote: Boolean(!this.sheetsConfigured && connectedMeta && !hasActiveOAuthToken),
       timezone: 'Asia/Jakarta',
     };
   }
@@ -1369,11 +1407,13 @@ export class LvbmsDataStore {
     const filePath = this.getLocalStorePath();
     if (!fs.existsSync(filePath)) {
       const seed = createInitialSeed();
+      this.normalizeSnapshotIntegrity(seed);
       this.writeLocalMirror(seed);
       return seed;
     }
     const raw = fs.readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw) as DatabaseSnapshot;
+    this.normalizeSnapshotIntegrity(parsed);
     if (this.normalizeVehicleTypes(parsed)) {
       this.writeLocalMirror(parsed);
     }
@@ -1418,7 +1458,13 @@ export class LvbmsDataStore {
     if (rows.length === 0) {
       return [['__EMPTY__']];
     }
-    const headers = Object.keys(rows[0]);
+    const headerSet = new Set<string>();
+    for (const row of rows) {
+      for (const k of Object.keys(row)) {
+        headerSet.add(k);
+      }
+    }
+    const headers = Array.from(headerSet);
     const body = rows.map((row) =>
       headers.map((h) => {
         const val = (row as Record<string, unknown>)[h];
@@ -1579,6 +1625,64 @@ export class LvbmsDataStore {
     throw new Error('Format URL atau Spreadsheet ID Google Sheets tidak valid.');
   }
 
+  private ensureArrayField<T>(val: unknown): T[] {
+    if (Array.isArray(val)) return val as T[];
+    if (typeof val === 'string' && val.trim().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) return parsed as T[];
+      } catch {
+        // Fallback to empty array
+      }
+    }
+    return [];
+  }
+
+  private normalizeSnapshotIntegrity(snapshot: DatabaseSnapshot) {
+    for (const key of SHEET_KEYS) {
+      if (!Array.isArray(snapshot[key])) {
+        (snapshot as unknown as Record<string, unknown[]>)[key] = [];
+      }
+    }
+    for (const b of snapshot.BOOKINGS) {
+      b.booking_id = String(b.booking_id || '');
+      b.booking_number = String(b.booking_number || '');
+      b.requester_email = String(b.requester_email || '');
+      b.requester_name = String(b.requester_name || '');
+      b.activity_name = String(b.activity_name || '');
+      b.destination_location = String(b.destination_location || '');
+      b.departure_location = String(b.departure_location || '');
+      b.department_id = String(b.department_id || '');
+      b.allocated_vehicle_ids = this.ensureArrayField<string>(b.allocated_vehicle_ids);
+      b.allocated_driver_ids = this.ensureArrayField<string>(b.allocated_driver_ids);
+      b.approval_history = this.ensureArrayField(b.approval_history);
+      b.passenger_count = Number(b.passenger_count || 0);
+      b.student_count = Number(b.student_count || 0);
+      b.companion_count = Number(b.companion_count || 0);
+      b.external_unit_count = Number(b.external_unit_count || 0);
+      b.estimated_budget = Number(b.estimated_budget || 0);
+    }
+    for (const d of snapshot.DRIVERS) {
+      d.eligible_vehicle_type_ids = this.ensureArrayField<string>(d.eligible_vehicle_type_ids);
+    }
+    for (const v of snapshot.VENDORS) {
+      v.service_types = this.ensureArrayField<string>(v.service_types);
+    }
+    for (const t of snapshot.INSPECTION_TEMPLATES) {
+      t.items = this.ensureArrayField(t.items);
+    }
+    for (const ins of snapshot.INSPECTIONS) {
+      ins.items = this.ensureArrayField(ins.items);
+    }
+    for (const r of snapshot.REPAIRS) {
+      r.change_log = this.ensureArrayField(r.change_log);
+    }
+    for (const s of snapshot.SETTINGS) {
+      s.reminder_days_before = this.ensureArrayField<number>(s.reminder_days_before);
+      if (s.reminder_days_before.length === 0) s.reminder_days_before = [30, 14, 7, 1];
+    }
+  }
+
   private async readFromGoogleSheets(
     sheets: sheets_v4.Sheets,
     spreadsheetId: string,
@@ -1604,7 +1708,51 @@ export class LvbmsDataStore {
         (result as Record<string, unknown[]>)[key] = parsed;
       }
     });
+    this.normalizeSnapshotIntegrity(result);
     return result;
+  }
+
+  private async tryShareSpreadsheetWithDomain(
+    oauthToken: string,
+    spreadsheetId: string
+  ): Promise<{ shared: boolean; domain: string; note?: string }> {
+    const domain = (process.env.ALLOWED_WORKSPACE_DOMAIN || 'lazuardi.sch.id').trim().toLowerCase();
+    try {
+      const drive = google.drive({ version: 'v3', auth: this.getOAuthClient(oauthToken) });
+      await drive.permissions.create({
+        fileId: spreadsheetId,
+        sendNotificationEmail: false,
+        requestBody: {
+          type: 'domain',
+          domain,
+          role: 'writer',
+        },
+      });
+      return { shared: true, domain };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err || '');
+      return {
+        shared: false,
+        domain,
+        note: msg || `Tidak dapat membagikan sheet otomatis ke domain @${domain}.`,
+      };
+    }
+  }
+
+  public async shareConnectedSpreadsheetWithDomain(
+    oauthToken: string
+  ): Promise<{ shared: boolean; domain: string; note?: string; connection: ConnectedSheetMeta }> {
+    const meta = this.getConnectedSheetMeta();
+    if (!meta?.spreadsheetId) {
+      throw new Error('Belum ada Google Spreadsheet yang terhubung.');
+    }
+    const shareResult = await this.tryShareSpreadsheetWithDomain(oauthToken, meta.spreadsheetId);
+    const updatedMeta: ConnectedSheetMeta = {
+      ...meta,
+      domainShared: shareResult.shared || meta.domainShared,
+    };
+    this.saveConnectedSheetMeta(updatedMeta);
+    return { ...shareResult, connection: updatedMeta };
   }
 
   public async provisionNewSpreadsheet(
@@ -1643,6 +1791,8 @@ export class LvbmsDataStore {
       await this.writeAllSheets(sheets, spreadsheetId, snapshot);
       await this.formatSheetHeaders(sheets, spreadsheetId);
 
+      const shareResult = await this.tryShareSpreadsheetWithDomain(oauthToken, spreadsheetId);
+
       const now = nowWibIso();
       const connection: ConnectedSheetMeta = {
         spreadsheetId,
@@ -1652,6 +1802,7 @@ export class LvbmsDataStore {
         connectedBy: actorEmail,
         lastSyncAt: now,
         lastAuthExpired: false,
+        domainShared: shareResult.shared,
       };
       this.saveConnectedSheetMeta(connection);
       this.writeLocalMirror(snapshot);
@@ -1709,6 +1860,8 @@ export class LvbmsDataStore {
         }
       }
 
+      const shareResult = await this.tryShareSpreadsheetWithDomain(oauthToken, spreadsheetId);
+
       const now = nowWibIso();
       const connection: ConnectedSheetMeta = {
         spreadsheetId,
@@ -1718,6 +1871,7 @@ export class LvbmsDataStore {
         connectedBy: actorEmail,
         lastSyncAt: now,
         lastAuthExpired: false,
+        domainShared: shareResult.shared,
       };
       this.saveConnectedSheetMeta(connection);
       this.writeLocalMirror(finalSnapshot);
@@ -1762,10 +1916,13 @@ export class LvbmsDataStore {
         this.cacheTimestamp = Date.now();
       }
 
+      const shareResult = await this.tryShareSpreadsheetWithDomain(oauthToken, meta.spreadsheetId);
+
       const updatedMeta: ConnectedSheetMeta = {
         ...meta,
         lastSyncAt: nowWibIso(),
         lastAuthExpired: false,
+        domainShared: shareResult.shared || meta.domainShared,
       };
       this.saveConnectedSheetMeta(updatedMeta);
       return updatedMeta;
@@ -1777,18 +1934,25 @@ export class LvbmsDataStore {
     this.sheetsEnsured = false;
   }
 
-  private async readSnapshotRaw(): Promise<DatabaseSnapshot> {
+  private async readSnapshotRaw(strictRemote = false): Promise<DatabaseSnapshot> {
+    const meta = this.getConnectedSheetMeta();
     const target = this.getActiveSheetsTarget();
+    if (strictRemote && !target && !this.sheetsConfigured && meta?.spreadsheetId) {
+      throw new SheetsSyncError(
+        'Sesi akses Google Sheets belum aktif pada tab ini. Silakan otorisasi ulang Google Workspace Anda.',
+        'GOOGLE_SHEETS_REAUTH_REQUIRED',
+        409
+      );
+    }
     if (target) {
       try {
         await this.ensureGoogleSheetsInitialized(target.sheets, target.spreadsheetId);
         const result = await this.readFromGoogleSheets(target.sheets, target.spreadsheetId);
         if (this.normalizeVehicleTypes(result)) {
-          await this.writeKeysToStorage(result, ['VEHICLE_TYPES']);
+          await this.writeKeysToStorage(result, ['VEHICLE_TYPES'], strictRemote);
         }
         if (target.mode === 'oauth') {
           this.writeLocalMirror(result);
-          const meta = this.getConnectedSheetMeta();
           if (meta?.lastAuthExpired) {
             this.saveConnectedSheetMeta({ ...meta, lastAuthExpired: false });
           }
@@ -1796,9 +1960,22 @@ export class LvbmsDataStore {
         return result;
       } catch (err) {
         if (target.mode === 'oauth' && this.isGoogleAuthError(err)) {
-          const meta = this.getConnectedSheetMeta();
           if (meta && !meta.lastAuthExpired) {
             this.saveConnectedSheetMeta({ ...meta, lastAuthExpired: true });
+          }
+          if (strictRemote) {
+            if (this.isGoogleForbiddenError(err)) {
+              throw new SheetsSyncError(
+                'Akun Google Anda belum memiliki izin baca/tulis pada Google Sheets database. Minta Admin GA membagikan sheet ke domain @lazuardi.sch.id atau mengatur Service Account.',
+                'GOOGLE_SHEET_PERMISSION_DENIED',
+                403
+              );
+            }
+            throw new SheetsSyncError(
+              'Token akses Google Sheets kedaluwarsa. Silakan klik izinkan ulang Google untuk menyinkronkan data.',
+              'GOOGLE_SHEETS_REAUTH_REQUIRED',
+              409
+            );
           }
           return this.readLocalSnapshotOrSeed();
         }
@@ -1809,11 +1986,22 @@ export class LvbmsDataStore {
     return this.readLocalSnapshotOrSeed();
   }
 
-  private async writeKeysToStorage(snapshot: DatabaseSnapshot, changedKeys: SheetKey[]) {
-    // Always keep local mirror up to date for resilience when Service Account env is absent
-    this.writeLocalMirror(snapshot);
-
+  private async writeKeysToStorage(
+    snapshot: DatabaseSnapshot,
+    changedKeys: SheetKey[],
+    strictRemote = false
+  ) {
+    const meta = this.getConnectedSheetMeta();
     const target = this.getActiveSheetsTarget();
+
+    if (strictRemote && !target && !this.sheetsConfigured && meta?.spreadsheetId) {
+      throw new SheetsSyncError(
+        'Token akses Google Sheets belum aktif pada sesi ini. Silakan klik otorisasi ulang agar pengajuan tersimpan ke Google Sheets.',
+        'GOOGLE_SHEETS_REAUTH_REQUIRED',
+        409
+      );
+    }
+
     if (target) {
       try {
         await this.ensureGoogleSheetsInitialized(target.sheets, target.spreadsheetId);
@@ -1836,21 +2024,31 @@ export class LvbmsDataStore {
           },
         });
 
-        if (target.mode === 'oauth') {
-          const meta = this.getConnectedSheetMeta();
-          if (meta) {
-            this.saveConnectedSheetMeta({
-              ...meta,
-              lastSyncAt: nowWibIso(),
-              lastAuthExpired: false,
-            });
-          }
+        if (target.mode === 'oauth' && meta) {
+          this.saveConnectedSheetMeta({
+            ...meta,
+            lastSyncAt: nowWibIso(),
+            lastAuthExpired: false,
+          });
         }
       } catch (err) {
         if (target.mode === 'oauth' && this.isGoogleAuthError(err)) {
-          const meta = this.getConnectedSheetMeta();
           if (meta && !meta.lastAuthExpired) {
             this.saveConnectedSheetMeta({ ...meta, lastAuthExpired: true });
+          }
+          if (strictRemote) {
+            if (this.isGoogleForbiddenError(err)) {
+              throw new SheetsSyncError(
+                'Akun Google Anda belum memiliki izin tulis ke Google Sheets database. Minta Admin GA mengklik "Bagikan Sheet ke @lazuardi.sch.id" atau mengaktifkan Service Account di menu Pengaturan.',
+                'GOOGLE_SHEET_PERMISSION_DENIED',
+                403
+              );
+            }
+            throw new SheetsSyncError(
+              'Token akses Google Sheets telah kedaluwarsa. Silakan otorisasi ulang untuk menyimpan data ke Google Sheets.',
+              'GOOGLE_SHEETS_REAUTH_REQUIRED',
+              409
+            );
           }
         } else {
           throw err;
@@ -1858,28 +2056,46 @@ export class LvbmsDataStore {
       }
     }
 
+    // Commit local mirror and caches only after remote sync succeeds (or when using local mode)
+    this.writeLocalMirror(snapshot);
     this.cache = snapshot;
     this.cacheTimestamp = Date.now();
+    const ctx = requestContextStorage.getStore();
+    if (ctx) {
+      ctx.requestSnapshot = snapshot;
+    }
   }
 
   public async getSnapshot(forceRefresh = false): Promise<DatabaseSnapshot> {
-    if (!forceRefresh && this.cache && Date.now() - this.cacheTimestamp < this.cacheTtlMs) {
+    const ctx = requestContextStorage.getStore();
+    if (!forceRefresh && ctx?.requestSnapshot) {
+      return structuredClone(ctx.requestSnapshot);
+    }
+    const effectiveTtl =
+      process.env.VERCEL === '1' && Boolean(this.getActiveSheetsTarget()) ? 0 : this.cacheTtlMs;
+    if (!forceRefresh && effectiveTtl > 0 && this.cache && Date.now() - this.cacheTimestamp < effectiveTtl) {
+      if (ctx) ctx.requestSnapshot = this.cache;
       return structuredClone(this.cache);
     }
-    const data = await this.readSnapshotRaw();
+    const data = await this.readSnapshotRaw(false);
     this.cache = data;
     this.cacheTimestamp = Date.now();
+    if (ctx) ctx.requestSnapshot = data;
     return structuredClone(data);
   }
 
   public async mutate<T>(
     changedKeys: SheetKey[],
-    fn: (db: DatabaseSnapshot) => Promise<T> | T
+    fn: (db: DatabaseSnapshot) => Promise<T> | T,
+    options?: { requireRemoteSync?: boolean }
   ): Promise<T> {
+    const strictRemote = Boolean(options?.requireRemoteSync);
     return this.mutex.runExclusive(async () => {
-      const db = await this.getSnapshot(true);
+      const ctx = requestContextStorage.getStore();
+      if (ctx) ctx.requestSnapshot = undefined;
+      const db = structuredClone(await this.readSnapshotRaw(strictRemote));
       const result = await fn(db);
-      await this.writeKeysToStorage(db, changedKeys);
+      await this.writeKeysToStorage(db, changedKeys, strictRemote);
       return result;
     });
   }

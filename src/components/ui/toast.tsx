@@ -1,14 +1,16 @@
 import React, { createContext, useCallback, useContext, useState } from 'react';
-import { CheckCircle2, Info, X, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
+
+type ToastType = 'success' | 'error' | 'info' | 'warning';
 
 interface ToastItem {
   id: string;
-  type: 'success' | 'error' | 'info';
+  type: ToastType;
   message: string;
 }
 
 interface ToastContextValue {
-  notify: (message: string, type?: 'success' | 'error' | 'info') => void;
+  notify: (message: string, type?: ToastType) => void;
 }
 
 const ToastContext = createContext<ToastContextValue>({ notify: () => {} });
@@ -16,12 +18,12 @@ const ToastContext = createContext<ToastContextValue>({ notify: () => {} });
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const notify = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const notify = useCallback((message: string, type: ToastType = 'info') => {
     const id = Math.random().toString(36).slice(2);
     setToasts((prev) => [...prev, { id, type, message }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4500);
+    }, 5500);
   }, []);
 
   return (
@@ -35,6 +37,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             className={`pointer-events-auto flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm shadow-lg ${
               t.type === 'error'
                 ? 'border-red-200 bg-red-50 text-red-900'
+                : t.type === 'warning'
+                ? 'border-amber-200 bg-amber-50 text-amber-900'
                 : t.type === 'success'
                 ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
                 : 'border-blue-200 bg-white text-slate-900'
@@ -42,6 +46,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           >
             {t.type === 'error' ? (
               <XCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+            ) : t.type === 'warning' ? (
+              <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
             ) : t.type === 'success' ? (
               <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
             ) : (

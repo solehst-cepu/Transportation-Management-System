@@ -22,6 +22,7 @@ export interface OAuthSheetInfo {
   connectedBy: string;
   lastSyncAt: string;
   lastAuthExpired?: boolean;
+  domainShared?: boolean;
 }
 
 export interface StorageDiagnostics {
@@ -33,6 +34,10 @@ export interface StorageDiagnostics {
   spreadsheetIdMasked: string | null;
   oauthSheet?: OAuthSheetInfo | null;
   hasActiveOAuthToken?: boolean;
+  isVercel?: boolean;
+  hasEnvSpreadsheetId?: boolean;
+  isEphemeralServerless?: boolean;
+  needsOAuthReauthForRemote?: boolean;
   timezone: string;
 }
 
@@ -136,9 +141,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setConfig(cfg);
 
       if (cfg.authenticated) {
-        const me = await apiRequest<{ user: SessionUser; settings: AppSettings | null }>('/api/auth/me');
+        const me = await apiRequest<{
+          user: SessionUser;
+          settings: AppSettings | null;
+          storage?: StorageDiagnostics;
+        }>('/api/auth/me');
         setUser(me.user);
         setSettings(me.settings);
+        if (me.storage) {
+          setConfig((prev) => (prev ? { ...prev, authenticated: true, storage: me.storage! } : prev));
+        }
         await refreshNotificationsCount();
       } else if (cfg.firebaseGoogleAuthEnabled && (await tryRestoreFirebaseSession())) {
         // Session seamlessly restored from active Firebase Google sign-in

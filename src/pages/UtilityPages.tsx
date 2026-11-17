@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
+  Share2,
   Unlink,
   UserCircle2,
 } from 'lucide-react';
@@ -217,6 +218,7 @@ export function SettingsPage() {
   const [confirmAction, setConfirmAction] = useState<ConfirmActionType>(null);
   const [busyAction, setBusyAction] = useState(false);
   const [authorizingGoogle, setAuthorizingGoogle] = useState(false);
+  const [sharingDomain, setSharingDomain] = useState(false);
 
   const loadAll = useCallback(async () => {
     const [sRes, aRes, gsRes] = await Promise.all([
@@ -279,6 +281,37 @@ export function SettingsPage() {
         throw new Error('Otorisasi Google Sheets & Drive dibatalkan atau token tidak diterima.');
       }
       return await fn({ 'X-Google-Access-Token': freshToken });
+    }
+  };
+
+  const handleShareDomain = async () => {
+    setSharingDomain(true);
+    try {
+      const res = await runWithGoogleOAuth((headers) =>
+        apiRequest<{
+          shared: boolean;
+          domain: string;
+          note?: string;
+          diagnostics: StorageDiagnostics;
+        }>('/api/integrations/google-sheets/share-domain', {
+          method: 'POST',
+          headers,
+        })
+      );
+      setStorage(res.diagnostics);
+      if (res.shared) {
+        notify(`Google Sheet berhasil dibagikan dengan izin edit ke domain @${res.domain}.`, 'success');
+      } else {
+        notify(
+          `Pembagian otomatis ke @${res.domain} dibatasi (${res.note || 'kebijakan domain'}). Gunakan Service Account untuk Vercel.`,
+          'warning'
+        );
+      }
+      await loadAll();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal membagikan sheet ke domain.', 'error');
+    } finally {
+      setSharingDomain(false);
     }
   };
 
@@ -453,6 +486,20 @@ export function SettingsPage() {
                     type="button"
                     size="sm"
                     variant="outline"
+                    onClick={() => void handleShareDomain()}
+                    disabled={sharingDomain}
+                  >
+                    <Share2 className="h-3.5 w-3.5" />
+                    {sharingDomain
+                      ? 'Membagikan...'
+                      : oauthSheet.domainShared
+                        ? 'Dibagikan ke @lazuardi.sch.id'
+                        : 'Bagikan ke @lazuardi.sch.id'}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
                     onClick={() => setConfirmAction({ type: 'sync', direction: 'push' })}
                   >
                     <ArrowUpFromLine className="h-3.5 w-3.5" />
@@ -485,7 +532,7 @@ export function SettingsPage() {
                   <div className="flex items-center gap-2">
                     <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
                     <span>
-                      Sesi token Google OAuth belum aktif atau kedaluwarsa. Data tetap tersimpan aman di server ledger dan akan tersinkron ke Google Sheet setelah otorisasi ulang.
+                      Sesi token Google OAuth belum aktif atau kedaluwarsa. Otorisasi ulang Google atau konfigurasikan Service Account agar penyimpanan selalu sinkron tanpa token user.
                     </span>
                   </div>
                   <Button
@@ -499,33 +546,52 @@ export function SettingsPage() {
                 </div>
               )}
 
-              <div className="rounded-lg bg-white border border-emerald-200/80 p-3 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <span className="font-semibold text-slate-800">Environment Vercel (Opsional Service Account):</span>{' '}
-                  <code className="font-mono text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded">
-                    GOOGLE_SHEETS_SPREADSHEET_ID={oauthSheet.spreadsheetId}
-                  </code>
+              <div className="rounded-lg bg-white border border-emerald-200/80 p-3.5 text-[11px] text-slate-600 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-900">
+                    Wajib untuk Deployment Vercel Multi-User (Service Account):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copyText(
+                        `GOOGLE_SHEETS_SPREADSHEET_ID=${oauthSheet.spreadsheetId}\nGOOGLE_SERVICE_ACCOUNT_EMAIL=\nGOOGLE_PRIVATE_KEY=`,
+                        'Template Env Vercel'
+                      )
+                    }
+                    className="inline-flex items-center gap-1 text-[#1755CE] hover:underline font-medium"
+                  >
+                    <Copy className="h-3 w-3" />
+                    Salin 3 Variabel Env Vercel
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void copyText(
-                      `GOOGLE_SHEETS_SPREADSHEET_ID=${oauthSheet.spreadsheetId}`,
-                      'Env GOOGLE_SHEETS_SPREADSHEET_ID'
-                    )
-                  }
-                  className="inline-flex items-center gap-1 text-[#1755CE] hover:underline font-medium"
-                >
-                  <Copy className="h-3 w-3" />
-                  Salin Env
-                </button>
+                <p className="leading-relaxed">
+                  Pada Vercel Serverless, tanpa Service Account setiap container berjalan terpisah dan token OAuth hilang setelah refresh halaman. Tambahkan 3 Environment Variables berikut di <strong>Vercel → Project Settings → Environment Variables</strong> lalu bagikan Sheet di atas (Editor) ke email Service Account:
+                </p>
+                <div className="rounded bg-slate-100 p-2 font-mono text-[11px] text-slate-800 space-y-0.5 overflow-x-auto">
+                  <div>GOOGLE_SHEETS_SPREADSHEET_ID={oauthSheet.spreadsheetId}</div>
+                  <div>GOOGLE_SERVICE_ACCOUNT_EMAIL=...gserviceaccount.com</div>
+                  <div>GOOGLE_PRIVATE_KEY=&quot;-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n&quot;</div>
+                </div>
               </div>
+            </div>
+          )}
+
+          {!isOAuthConnected && !isServiceAccount && storage?.isVercel && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs text-amber-950 space-y-2">
+              <div className="font-semibold flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                <span>Mengapa Data Booking Tidak Tersimpan di Vercel Saat Ini?</span>
+              </div>
+              <p className="leading-relaxed">
+                Aplikasi di Vercel saat ini belum terhubung ke Google Sheets Service Account (berjalan pada memori sementara <code className="font-mono">/tmp</code> per container). Buat/hubungkan Google Sheet di bawah, bagikan ke email Service Account sebagai <strong>Editor</strong>, lalu isi <code className="font-mono">GOOGLE_SHEETS_SPREADSHEET_ID</code>, <code className="font-mono">GOOGLE_SERVICE_ACCOUNT_EMAIL</code>, dan <code className="font-mono">GOOGLE_PRIVATE_KEY</code> di Vercel Environment Variables agar data booking dari User langsung tersimpan &amp; masuk ke Admin.
+              </p>
             </div>
           )}
 
           {isServiceAccount && (
             <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-4 text-xs text-blue-950">
-              Sistem berjalan menggunakan koneksi <strong>Service Account Google Sheets API v4</strong> ({storage?.spreadsheetIdMasked}). Seluruh transaksi otomatis tersinkron ke Google Sheets secara real-time.
+              Sistem berjalan menggunakan koneksi <strong>Service Account Google Sheets API v4</strong> ({storage?.spreadsheetIdMasked}). Seluruh transaksi dari User maupun Admin otomatis tersinkron ke Google Sheets secara real-time.
             </div>
           )}
 

@@ -8,11 +8,12 @@ import {
   Eye,
   FileEdit,
   Plus,
+  RefreshCw,
   Search,
   ShieldAlert,
   Users,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext.tsx';
+import { StorageDiagnostics, useAuth } from '../context/AuthContext.tsx';
 import { apiRequest } from '../lib/api.ts';
 import { EnrichedBookingForPdf, exportBookingSlipPdf } from '../lib/pdfExport.ts';
 import { formatDateTimeWib, formatIdr } from '../lib/utils.ts';
@@ -72,16 +73,22 @@ export function BookingsListPage({
 }: {
   mode?: 'approval' | 'all' | 'my' | 'history';
 }) {
-  const { user } = useAuth();
+  const { user, config, reauthorizeGoogleWorkspace, refreshSession } = useAuth();
   const { notify } = useToast();
   const isAdmin = user?.role === 'ADMIN';
 
   const [bookings, setBookings] = useState<EnrichedBookingForPdf[]>([]);
+  const [listStorage, setListStorage] = useState<StorageDiagnostics | null>(null);
   const [loading, setLoading] = useState(true);
+  const [syncingGoogle, setSyncingGoogle] = useState(false);
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<ApprovalTab>(
     mode === 'approval' ? 'Perlu Review' : 'Semua Pengajuan'
   );
+
+  useEffect(() => {
+    setActiveTab(mode === 'approval' ? 'Perlu Review' : 'Semua Pengajuan');
+  }, [mode]);
 
   // Detail & action modals
   const [selectedBooking, setSelectedBooking] = useState<EnrichedBookingForPdf | null>(null);
@@ -143,14 +150,36 @@ export function BookingsListPage({
   const loadBookings = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await apiRequest<{ bookings: EnrichedBookingForPdf[] }>('/api/bookings');
+      const res = await apiRequest<{
+        bookings: EnrichedBookingForPdf[];
+        storage?: StorageDiagnostics;
+      }>('/api/bookings');
       setBookings(res.bookings);
+      if (res.storage) setListStorage(res.storage);
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Gagal memuat pengajuan.', 'error');
     } finally {
       setLoading(false);
     }
   }, [notify]);
+
+  const handleSyncGoogleSheets = async () => {
+    setSyncingGoogle(true);
+    try {
+      const token = await reauthorizeGoogleWorkspace();
+      if (!token) {
+        notify('Otorisasi Google Sheets dibatalkan.', 'warning');
+        return;
+      }
+      await refreshSession();
+      await loadBookings();
+      notify('Data terbaru berhasil dimuat dari Google Sheets.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menyinkronkan Google Sheets.', 'error');
+    } finally {
+      setSyncingGoogle(false);
+    }
+  };
 
   useEffect(() => {
     void loadBookings();
@@ -349,19 +378,57 @@ export function BookingsListPage({
       if (search.trim()) {
         const q = search.toLowerCase();
         return (
-          b.booking_number.toLowerCase().includes(q) ||
-          b.activity_name.toLowerCase().includes(q) ||
-          b.requester_name.toLowerCase().includes(q) ||
-          (b.department_name || '').toLowerCase().includes(q) ||
-          b.destination_location.toLowerCase().includes(q)
+          String(b.booking_number || '').toLowerCase().includes(q) ||
+          String(b.activity_name || '').toLowerCase().includes(q) ||
+          String(b.requester_name || '').toLowerCase().includes(q) ||
+          String(b.department_name || '').toLowerCase().includes(q) ||
+          String(b.destination_location || '').toLowerCase().includes(q)
         );
       }
       return true;
     });
   }, [bookings, activeTab, mode, search]);
 
+  const tabCounts = useMemo(() => {
+    const counts: Record<ApprovalTab, number> = {
+      'Semua Pengajuan': bookings.length,
+      'Perlu Review': bookings.filter((b) => ['Diajukan', 'Dalam Review GA'].includes(b.status)).length,
+      'Perlu Revisi': bookings.filter((b) => b.status === 'Perlu Revisi').length,
+      Internal: bookings.filter((b) => b.booking_kind === 'INTERNAL').length,
+      Eksternal: bookings.filter((b) => b.booking_kind === 'EXTERNAL').length,
+      Disetujui: bookings.filter((b) =>
+        ['Disetujui', 'Dijadwalkan', 'Vendor Dipilih', 'Dipesan', 'Dalam Perjalanan'].includes(b.status)
+      ).length,
+      Ditolak: bookings.filter((b) => ['Ditolak', 'Dibatalkan'].includes(b.status)).length,
+      Selesai: bookings.filter((b) => b.status === 'Selesai').length,
+    };
+    return counts;
+  }, [bookings]);
+
+  const activeStorage = listStorage || config?.storage;
+
   return (
     <div className="space-y-5">
+      {activeStorage?.needsOAuthReauthForRemote && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+            <span>
+              Token akses Google Sheets pada tab ini belum aktif (biasanya setelah halaman dimuat ulang). Klik sinkronkan agar data terbaru langsung dibaca dari Google Sheets.
+            </span>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void handleSyncGoogleSheets()}
+            disabled={syncingGoogle}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${syncingGoogle ? 'animate-spin' : ''}`} />
+            {syncingGoogle ? 'Menyinkronkan...' : 'Sinkronkan Google Sheets'}
+          </Button>
+        </div>
+      )}
+
       {/* Filter & Tabs Header */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         {mode !== 'history' && (
@@ -377,20 +444,32 @@ export function BookingsListPage({
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                {tab}
+                {tab} ({tabCounts[tab]})
               </button>
             ))}
           </div>
         )}
 
-        <div className="relative w-full lg:w-72 ml-auto">
-          <Search className="h-4 w-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <Input
-            placeholder="Cari no, kegiatan, pemohon..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
-          />
+        <div className="flex items-center gap-2 w-full lg:w-auto ml-auto">
+          <div className="relative flex-1 lg:w-64">
+            <Search className="h-4 w-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Input
+              placeholder="Cari no, kegiatan, pemohon..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void loadBookings()}
+            disabled={loading}
+            title="Muat ulang daftar pengajuan"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </Button>
         </div>
       </div>
 
