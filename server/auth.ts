@@ -339,15 +339,34 @@ interface FirebaseAppletConfig {
 let cachedFirebaseConfig: FirebaseAppletConfig | null | undefined;
 export function getFirebaseAppletConfig(): FirebaseAppletConfig | null {
   if (cachedFirebaseConfig !== undefined) return cachedFirebaseConfig;
-  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-  try {
-    if (fs.existsSync(configPath)) {
-      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as FirebaseAppletConfig;
-      cachedFirebaseConfig = parsed;
-      return cachedFirebaseConfig;
+  const candidates = [
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(path.dirname(new URL(import.meta.url).pathname), '../firebase-applet-config.json'),
+  ];
+  for (const configPath of candidates) {
+    try {
+      if (fs.existsSync(configPath)) {
+        const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as FirebaseAppletConfig;
+        cachedFirebaseConfig = {
+          projectId: process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || parsed.projectId,
+          apiKey: process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || parsed.apiKey,
+          oAuthClientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || parsed.oAuthClientId,
+        };
+        return cachedFirebaseConfig;
+      }
+    } catch {
+      // Try next candidate
     }
-  } catch {
-    // Ignore invalid file
+  }
+  const envProjectId = process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
+  const envApiKey = process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY;
+  if (envProjectId || envApiKey) {
+    cachedFirebaseConfig = {
+      projectId: envProjectId,
+      apiKey: envApiKey,
+      oAuthClientId: process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID,
+    };
+    return cachedFirebaseConfig;
   }
   cachedFirebaseConfig = null;
   return null;

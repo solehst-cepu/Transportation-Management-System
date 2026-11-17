@@ -33,6 +33,7 @@ export interface StorageDiagnostics {
 interface AuthConfig {
   googleClientId: string | null;
   firebaseGoogleAuthEnabled: boolean;
+  firebaseProjectId?: string | null;
   allowedDomain: string;
   previewAuthEnabled: boolean;
   authenticated: boolean;

@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, ChevronDown, ChevronUp, ShieldCheck } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Copy, ExternalLink, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
+import { getActiveFirebaseProjectId } from '../lib/firebaseAuth.ts';
 import { Button } from '../components/ui/button.tsx';
 import { Input, Label } from '../components/ui/input.tsx';
 import { useToast } from '../components/ui/toast.tsx';
@@ -42,8 +43,10 @@ export function LoginPage() {
   const [previewName, setPreviewName] = useState('Soleh S.T.');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [unauthorizedDomainHost, setUnauthorizedDomainHost] = useState('');
 
   const allowedDomain = config?.allowedDomain || 'lazuardi.sch.id';
+  const activeFirebaseProjectId = config?.firebaseProjectId || getActiveFirebaseProjectId() || 'gen-lang-client-0473476564';
 
   useEffect(() => {
     if (user) {
@@ -99,6 +102,7 @@ export function LoginPage() {
   const handleGooglePopupLogin = async () => {
     setSubmitting(true);
     setErrorMsg('');
+    setUnauthorizedDomainHost('');
     try {
       await loginWithGooglePopup(loginScope);
       notify(
@@ -109,8 +113,15 @@ export function LoginPage() {
       );
       navigate('/dashboard', { replace: true });
     } catch (err) {
+      const code = (err as { code?: string })?.code || '';
       const rawMsg = err instanceof Error ? err.message : 'Verifikasi Google SSO gagal.';
-      if (rawMsg.includes('popup-closed-by-user')) {
+      if (code === 'auth/unauthorized-domain' || rawMsg.includes('unauthorized-domain')) {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setUnauthorizedDomainHost(host);
+        setErrorMsg(
+          `Domain "${host}" belum terdaftar di Authorized Domains Firebase Authentication.`
+        );
+      } else if (rawMsg.includes('popup-closed-by-user')) {
         setErrorMsg('Jendela login Google ditutup sebelum selesai.');
       } else if (rawMsg.includes('popup-blocked')) {
         setErrorMsg('Browser memblokir popup Google SSO. Izinkan popup untuk situs ini lalu coba lagi.');
@@ -119,6 +130,17 @@ export function LoginPage() {
       }
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const copyDomainHost = async () => {
+    const target = unauthorizedDomainHost || (typeof window !== 'undefined' ? window.location.hostname : '');
+    if (!target) return;
+    try {
+      await navigator.clipboard.writeText(target);
+      notify(`Domain "${target}" disalin.`, 'success');
+    } catch {
+      notify('Gagal menyalin domain.', 'error');
     }
   };
 
@@ -231,9 +253,53 @@ export function LoginPage() {
           </div>
 
           {errorMsg && (
-            <div className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 p-3.5 text-xs text-red-800">
-              <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
-              <span>{errorMsg}</span>
+            <div className="rounded-lg border border-red-200 bg-red-50 p-3.5 text-xs text-red-800 space-y-2.5">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                <span className="font-medium">{errorMsg}</span>
+              </div>
+
+              {unauthorizedDomainHost && (
+                <div className="rounded-md bg-white border border-red-200 p-3 text-slate-700 space-y-2">
+                  <div className="font-semibold text-slate-900">
+                    Cara Mengaktifkan Login Google untuk Domain Vercel Ini:
+                  </div>
+                  <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed">
+                    <li>
+                      Salin domain aplikasi Anda:{' '}
+                      <code className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-900">
+                        {unauthorizedDomainHost}
+                      </code>{' '}
+                      <button
+                        type="button"
+                        onClick={() => void copyDomainHost()}
+                        className="inline-flex items-center gap-1 text-[#1755CE] hover:underline font-semibold ml-1"
+                      >
+                        <Copy className="h-3 w-3" />
+                        Salin
+                      </button>
+                    </li>
+                    <li>
+                      Buka <strong>Firebase Console → Authentication → Settings → Authorized domains</strong> untuk proyek{' '}
+                      <code className="font-mono text-slate-900">{activeFirebaseProjectId}</code>.
+                    </li>
+                    <li>
+                      Klik <strong>Add domain</strong>, tempel domain di atas, klik <strong>Add</strong>, lalu muat ulang halaman ini.
+                    </li>
+                  </ol>
+                  <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <a
+                      href={`https://console.firebase.google.com/project/${activeFirebaseProjectId}/authentication/settings`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[#1755CE] px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-[#1245AA]"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      Buka Authorized Domains Firebase
+                    </a>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -267,7 +333,7 @@ export function LoginPage() {
               <div ref={gsiContainerRef} className="min-h-[44px] flex items-center justify-center" />
             )}
 
-            {config?.firebaseGoogleAuthEnabled && (
+            {config?.firebaseGoogleAuthEnabled && (!config?.googleClientId) && (
               <button
                 type="button"
                 onClick={handleGooglePopupLogin}

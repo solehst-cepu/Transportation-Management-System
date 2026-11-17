@@ -29,9 +29,21 @@ export function clearCachedGoogleAccessToken() {
   cachedAccessToken = null;
 }
 
+const resolvedFirebaseConfig = {
+  ...firebaseConfig,
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseConfig.projectId,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseConfig.appId,
+};
+
+export function getActiveFirebaseProjectId(): string {
+  return resolvedFirebaseConfig.projectId || '';
+}
+
 function getFirebaseAuthInstance(): Auth {
   if (!authInstance) {
-    const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    const app = getApps().length > 0 ? getApp() : initializeApp(resolvedFirebaseConfig);
     authInstance = getAuth(app);
     onAuthStateChanged(authInstance, (user) => {
       if (!user && !isSigningIn) {
@@ -69,6 +81,20 @@ export async function signInWithGooglePopup(allowedDomain = 'lazuardi.sch.id'): 
       idToken: credential?.idToken || undefined,
       oauthAccessToken: cachedAccessToken || undefined,
     };
+  } catch (err) {
+    const code = (err as { code?: string })?.code || '';
+    const msg = err instanceof Error ? err.message : String(err || '');
+    if (code === 'auth/unauthorized-domain' || msg.includes('unauthorized-domain')) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const wrapped = new Error(
+        `auth/unauthorized-domain: Domain "${host}" belum terdaftar di Authorized Domains Firebase (${resolvedFirebaseConfig.projectId}).`
+      ) as Error & { code?: string; hostname?: string; projectId?: string };
+      wrapped.code = 'auth/unauthorized-domain';
+      wrapped.hostname = host;
+      wrapped.projectId = resolvedFirebaseConfig.projectId;
+      throw wrapped;
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }

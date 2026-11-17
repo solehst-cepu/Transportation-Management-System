@@ -1172,10 +1172,9 @@ export class LvbmsDataStore {
   }
 
   private getConnectionMetaPaths(): string[] {
-    return [
-      path.resolve(process.cwd(), '.data', 'google-sheets-connection.json'),
-      '/tmp/google-sheets-connection.json',
-    ];
+    const tmpPath = '/tmp/google-sheets-connection.json';
+    const localPath = path.resolve(process.cwd(), '.data', 'google-sheets-connection.json');
+    return process.env.VERCEL === '1' ? [tmpPath, localPath] : [localPath, tmpPath];
   }
 
   public getConnectedSheetMeta(): ConnectedSheetMeta | null {
@@ -1187,6 +1186,20 @@ export class LvbmsDataStore {
         }
       } catch {
         // Ignore invalid metadata file
+      }
+    }
+    if (process.env.GOOGLE_SHEETS_SPREADSHEET_ID && !this.sheetsConfigured) {
+      const id = process.env.GOOGLE_SHEETS_SPREADSHEET_ID.trim();
+      if (id) {
+        return {
+          spreadsheetId: id,
+          spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${id}/edit`,
+          title: 'LVBMS Database (Env Configured)',
+          connectedAt: '',
+          connectedBy: 'Environment Variable',
+          lastSyncAt: '',
+          lastAuthExpired: false,
+        };
       }
     }
     return null;
@@ -1318,12 +1331,27 @@ export class LvbmsDataStore {
   }
 
   private getLocalStorePath(): string {
+    if (process.env.VERCEL === '1') {
+      const tmpTarget = '/tmp/lvbms-db.json';
+      if (!fs.existsSync(tmpTarget)) {
+        const bundledSeed = path.resolve(process.cwd(), '.data', 'lvbms-db.json');
+        try {
+          if (fs.existsSync(bundledSeed)) {
+            fs.copyFileSync(bundledSeed, tmpTarget);
+          }
+        } catch {
+          // Ignore copy failure; createInitialSeed() will initialize it
+        }
+      }
+      return tmpTarget;
+    }
     const preferred = path.resolve(process.cwd(), '.data', 'lvbms-db.json');
     try {
       const dir = path.dirname(preferred);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
+      fs.accessSync(dir, fs.constants.W_OK);
       return preferred;
     } catch {
       return '/tmp/lvbms-db.json';
@@ -1594,7 +1622,6 @@ export class LvbmsDataStore {
         requestBody: {
           properties: {
             title: cleanTitle,
-            locale: 'id_ID',
             timeZone: 'Asia/Jakarta',
           },
           sheets: SHEET_KEYS.map((sheetTitle) => ({
@@ -1940,18 +1967,20 @@ export class LvbmsDataStore {
     }
 
     // Fallback server upload storage (never localStorage)
-    const uploadDir = path.resolve(process.cwd(), '.data', 'uploads');
-    try {
-      if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-      }
-    } catch {
-      // ignore
-    }
     const safeName = `${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const target = fs.existsSync(uploadDir)
-      ? path.join(uploadDir, safeName)
-      : path.join('/tmp', safeName);
+    let target = path.join('/tmp', safeName);
+    if (process.env.VERCEL !== '1') {
+      const uploadDir = path.resolve(process.cwd(), '.data', 'uploads');
+      try {
+        if (!fs.existsSync(uploadDir)) {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        fs.accessSync(uploadDir, fs.constants.W_OK);
+        target = path.join(uploadDir, safeName);
+      } catch {
+        // Keep /tmp fallback
+      }
+    }
     fs.writeFileSync(target, buffer);
 
     return {

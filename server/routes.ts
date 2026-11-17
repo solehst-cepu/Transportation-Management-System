@@ -84,6 +84,7 @@ apiRouter.get('/auth/config', (req, res) => {
   res.json({
     googleClientId: gisClientId,
     firebaseGoogleAuthEnabled,
+    firebaseProjectId: firebaseCfg?.projectId || null,
     allowedDomain: process.env.ALLOWED_WORKSPACE_DOMAIN || 'lazuardi.sch.id',
     previewAuthEnabled: !gisClientId && !isVercel,
     authenticated: Boolean(sessionUser),
