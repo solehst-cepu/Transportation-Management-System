@@ -1,0 +1,6 @@
+{
+  "name": "Lazuardi Vehicle Booking & Transportation Management System",
+  "description": "Enterprise Vehicle Booking System and Transportation Management System (LVBMS) for Sekolah Lazuardi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

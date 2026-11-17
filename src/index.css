@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-lazuardi: #1755CE;
+  --color-lazuardi-dark: #1142A3;
+  --color-lazuardi-light: #EFF6FF;
+}
+
+@layer base {
+  html,
+  body {
+    font-family: var(--font-sans);
+    background-color: #f8fafc;
+    color: #0f172a;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
+
+@layer components {
+  .gsi-material-button {
+    user-select: none;
+    -webkit-user-select: none;
+    appearance: none;
+    background-color: #ffffff;
+    background-image: none;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.5rem;
+    box-sizing: border-box;
+    color: #0f172a;
+    cursor: pointer;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 500;
+    height: 44px;
+    letter-spacing: 0.15px;
+    outline: none;
+    overflow: hidden;
+    padding: 0 16px;
+    position: relative;
+    text-align: center;
+    transition: background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
+    vertical-align: middle;
+    white-space: nowrap;
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .gsi-material-button:hover:not(:disabled) {
+    background-color: #f8fafc;
+    border-color: #94a3b8;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  }
+
+  .gsi-material-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .gsi-material-button-content-wrapper {
+    align-items: center;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    height: 100%;
+    justify-content: center;
+    position: relative;
+    width: 100%;
+    gap: 10px;
+  }
+
+  .gsi-material-button-icon {
+    height: 20px;
+    width: 20px;
+    min-width: 20px;
+  }
+
+  .gsi-material-button-contents {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
