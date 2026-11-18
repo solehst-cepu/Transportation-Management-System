@@ -11,10 +11,12 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  Trash2,
   Users,
 } from 'lucide-react';
 import { StorageDiagnostics, useAuth } from '../context/AuthContext.tsx';
-import { apiRequest } from '../lib/api.ts';
+import { ApiError, apiRequest } from '../lib/api.ts';
+import { ConfirmDeleteDialog } from '../components/ConfirmDeleteDialog.tsx';
 import { EnrichedBookingForPdf, exportBookingSlipPdf } from '../lib/pdfExport.ts';
 import { formatDateTimeWib, formatIdr } from '../lib/utils.ts';
 import {
@@ -146,6 +148,9 @@ export function BookingsListPage({
     passenger_count: 1,
     notes: '',
   });
+
+  const [deleteTarget, setDeleteTarget] = useState<EnrichedBookingForPdf | null>(null);
+  const [deletingBooking, setDeletingBooking] = useState(false);
 
   const loadBookings = useCallback(async () => {
     setLoading(true);
@@ -353,6 +358,40 @@ export function BookingsListPage({
     }
   };
 
+  const handleConfirmDeleteBooking = async () => {
+    if (!deleteTarget) return;
+    setDeletingBooking(true);
+    try {
+      const doDelete = () =>
+        apiRequest<{ ok: boolean; booking_number?: string }>(
+          `/api/bookings/${deleteTarget.booking_id}`,
+          { method: 'DELETE' }
+        );
+      try {
+        await doDelete();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const token = await reauthorizeGoogleWorkspace();
+          if (!token) throw err;
+          await doDelete();
+        } else {
+          throw err;
+        }
+      }
+      notify(`Log order ${deleteTarget.booking_number} berhasil dihapus.`, 'success');
+      if (selectedBooking?.booking_id === deleteTarget.booking_id) {
+        setDetailOpen(false);
+        setSelectedBooking(null);
+      }
+      setDeleteTarget(null);
+      await loadBookings();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus log order.', 'error');
+    } finally {
+      setDeletingBooking(false);
+    }
+  };
+
   const filtered = useMemo(() => {
     return bookings.filter((b) => {
       if (mode === 'history' && !['Selesai', 'Ditolak', 'Dibatalkan'].includes(b.status)) {
@@ -553,6 +592,16 @@ export function BookingsListPage({
                         >
                           <Download className="h-3.5 w-3.5" />
                         </Button>
+                        {isAdmin && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setDeleteTarget(b)}
+                            title="Hapus Log Order"
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                          </Button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -774,6 +823,15 @@ export function BookingsListPage({
                         Tandai Selesai
                       </Button>
                     )}
+
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => setDeleteTarget(selectedBooking)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Hapus Log Order
+                    </Button>
                   </div>
                 </div>
               )}
@@ -1280,6 +1338,18 @@ export function BookingsListPage({
           </div>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Log Order / Pengajuan"
+        itemName={
+          deleteTarget ? `${deleteTarget.booking_number} — ${deleteTarget.activity_name}` : ''
+        }
+        description="Log order ini beserta penawaran vendor terkait akan dihapus permanen dari daftar pengajuan dan Google Sheets."
+        loading={deletingBooking}
+        onConfirm={handleConfirmDeleteBooking}
+      />
     </div>
   );
 }

@@ -16,11 +16,13 @@ import {
   RefreshCw,
   ShieldCheck,
   Share2,
+  Trash2,
   Unlink,
   UserCircle2,
 } from 'lucide-react';
 import { StorageDiagnostics, useAuth } from '../context/AuthContext.tsx';
 import { ApiError, apiRequest } from '../lib/api.ts';
+import { ConfirmDeleteDialog } from '../components/ConfirmDeleteDialog.tsx';
 import { formatDateTimeWib } from '../lib/utils.ts';
 import { AppSettings, AuditLog, Department, NotificationItem } from '../../shared/types.ts';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.tsx';
@@ -219,6 +221,8 @@ export function SettingsPage() {
   const [busyAction, setBusyAction] = useState(false);
   const [authorizingGoogle, setAuthorizingGoogle] = useState(false);
   const [sharingDomain, setSharingDomain] = useState(false);
+  const [deleteAuditTarget, setDeleteAuditTarget] = useState<AuditLog | null>(null);
+  const [deletingAudit, setDeletingAudit] = useState(false);
 
   const loadAll = useCallback(async () => {
     const [sRes, aRes, gsRes] = await Promise.all([
@@ -243,6 +247,33 @@ export function SettingsPage() {
     if (!settings) return;
     await apiRequest('/api/settings', { method: 'PUT', body: JSON.stringify(settings) });
     notify('Pengaturan sistem LVBMS disimpan.', 'success');
+  };
+
+  const handleConfirmDeleteAuditLog = async () => {
+    if (!deleteAuditTarget) return;
+    setDeletingAudit(true);
+    try {
+      const doDelete = () =>
+        apiRequest(`/api/audit-logs/${deleteAuditTarget.log_id}`, { method: 'DELETE' });
+      try {
+        await doDelete();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const token = await reauthorizeGoogleWorkspace();
+          if (!token) throw err;
+          await doDelete();
+        } else {
+          throw err;
+        }
+      }
+      notify('Log audit sistem dihapus.', 'success');
+      setDeleteAuditTarget(null);
+      await loadAll();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus log audit.', 'error');
+    } finally {
+      setDeletingAudit(false);
+    }
   };
 
   const handleAuthorizeGoogle = async () => {
@@ -834,22 +865,42 @@ export function SettingsPage() {
                 <th className="p-3">Aksi</th>
                 <th className="p-3">Entitas</th>
                 <th className="p-3">Ringkasan</th>
+                <th className="p-3 text-right">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {auditLogs.map((log) => (
-                <tr key={log.log_id}>
+                <tr key={log.log_id} className="hover:bg-slate-50">
                   <td className="p-3 tabular-nums whitespace-nowrap">{formatDateTimeWib(log.timestamp)}</td>
                   <td className="p-3">{log.actor_email} ({log.actor_role})</td>
                   <td className="p-3 font-mono text-[#1755CE]">{log.action}</td>
                   <td className="p-3 font-mono">{log.entity_type}</td>
                   <td className="p-3">{log.summary}</td>
+                  <td className="p-3 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDeleteAuditTarget(log)}
+                      title="Hapus Log Audit"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                    </Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </CardContent>
       </Card>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteAuditTarget)}
+        onOpenChange={(open) => !open && setDeleteAuditTarget(null)}
+        title="Hapus Log Audit Sistem"
+        itemName={deleteAuditTarget ? `${deleteAuditTarget.action} — ${deleteAuditTarget.summary}` : ''}
+        loading={deletingAudit}
+        onConfirm={handleConfirmDeleteAuditLog}
+      />
 
       {/* Explicit Confirmation Dialog for Mutating Google Sheets Actions */}
       <Dialog open={Boolean(confirmAction)} onOpenChange={(open) => !open && !busyAction && setConfirmAction(null)}>

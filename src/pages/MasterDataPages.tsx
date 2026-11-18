@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Bus, Car, Pencil, Plus, Search, Trash2 } from 'lucide-react';
-import { apiRequest } from '../lib/api.ts';
+import { useAuth } from '../context/AuthContext.tsx';
+import { ApiError, apiRequest } from '../lib/api.ts';
+import { ConfirmDeleteDialog } from '../components/ConfirmDeleteDialog.tsx';
 import { formatIdr } from '../lib/utils.ts';
 import {
   AdminUser,
@@ -22,13 +24,32 @@ import {
 } from '../components/ui/dialog.tsx';
 import { useToast } from '../components/ui/toast.tsx';
 
+async function deleteWithOAuthRetry<T>(
+  url: string,
+  reauthorizeGoogleWorkspace: () => Promise<string | null>
+): Promise<T> {
+  try {
+    return await apiRequest<T>(url, { method: 'DELETE' });
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+      const token = await reauthorizeGoogleWorkspace();
+      if (!token) throw err;
+      return await apiRequest<T>(url, { method: 'DELETE' });
+    }
+    throw err;
+  }
+}
+
 export function DepartmentsPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [rows, setRows] = useState<Department[]>([]);
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<Partial<Department>>({});
+  const [deleteTarget, setDeleteTarget] = useState<Department | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     const res = await apiRequest<{ departments: Department[] }>('/api/departments');
@@ -58,15 +79,27 @@ export function DepartmentsPage() {
     await load();
   };
 
-  const handleDelete = async (id: string) => {
-    const res = await apiRequest<{ softDeleted: boolean }>(`/api/departments/${id}`, { method: 'DELETE' });
-    notify(
-      res.softDeleted
-        ? 'Unit dinonaktifkan (soft delete) karena memiliki riwayat transaksi.'
-        : 'Unit dihapus.',
-      'info'
-    );
-    await load();
+  const handleConfirmDelete = async (force: boolean) => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const res = await deleteWithOAuthRetry<{ softDeleted: boolean }>(
+        `/api/departments/${deleteTarget.department_id}${force ? '?force=true' : ''}`,
+        reauthorizeGoogleWorkspace
+      );
+      notify(
+        res.softDeleted
+          ? 'Unit dinonaktifkan karena memiliki riwayat transaksi. Centang "Hapus permanen" jika ingin menghapus baris.'
+          : 'Unit berhasil dihapus.',
+        res.softDeleted ? 'info' : 'success'
+      );
+      setDeleteTarget(null);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus unit.', 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const filtered = rows.filter(
@@ -130,7 +163,12 @@ export function DepartmentsPage() {
                     >
                       Edit
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => void handleDelete(d.department_id)}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDeleteTarget(d)}
+                      title="Hapus Unit"
+                    >
                       <Trash2 className="h-3.5 w-3.5 text-red-600" />
                     </Button>
                   </td>
@@ -218,17 +256,30 @@ export function DepartmentsPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Unit / Departemen"
+        itemName={deleteTarget ? `${deleteTarget.department_code} — ${deleteTarget.department_name}` : ''}
+        allowForceDelete
+        loading={deleting}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }
 
 export function DriversPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<Partial<Driver>>({ eligible_vehicle_type_ids: [] });
+  const [deleteTarget, setDeleteTarget] = useState<Driver | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     const [dRes, vtRes] = await Promise.all([
@@ -254,6 +305,29 @@ export function DriversPage() {
     }
     setModalOpen(false);
     await load();
+  };
+
+  const handleConfirmDelete = async (force: boolean) => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const res = await deleteWithOAuthRetry<{ softDeleted: boolean }>(
+        `/api/drivers/${deleteTarget.driver_id}${force ? '?force=true' : ''}`,
+        reauthorizeGoogleWorkspace
+      );
+      notify(
+        res.softDeleted
+          ? 'Pengemudi dinonaktifkan karena memiliki riwayat tugas. Centang "Hapus permanen" jika ingin menghapus baris.'
+          : 'Data pengemudi berhasil dihapus.',
+        res.softDeleted ? 'info' : 'success'
+      );
+      setDeleteTarget(null);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus pengemudi.', 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const vtMap = new Map(vehicleTypes.map((t) => [t.vehicle_type_id, t.code]));
@@ -307,7 +381,7 @@ export function DriversPage() {
                     {d.eligible_vehicle_type_ids.map((id) => vtMap.get(id) || id).join(', ') || '-'}
                   </td>
                   <td className="px-4 py-3"><StatusLabel status={d.active_status} /></td>
-                  <td className="px-4 py-3 text-right">
+                  <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
                     <Button
                       size="sm"
                       variant="ghost"
@@ -318,6 +392,14 @@ export function DriversPage() {
                       }}
                     >
                       Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDeleteTarget(d)}
+                      title="Hapus Pengemudi"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
                     </Button>
                   </td>
                 </tr>
@@ -425,11 +507,22 @@ export function DriversPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Master Pengemudi"
+        itemName={deleteTarget ? `${deleteTarget.full_name} (${deleteTarget.internal_id})` : ''}
+        allowForceDelete
+        loading={deleting}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }
 
 export function VendorsPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [services, setServices] = useState<VendorService[]>([]);
@@ -438,6 +531,9 @@ export function VendorsPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<Partial<Vendor>>({ service_types: [] });
   const [svcForm, setSvcForm] = useState<Partial<VendorService>>({});
+  const [deleteVendorTarget, setDeleteVendorTarget] = useState<Vendor | null>(null);
+  const [deleteServiceTarget, setDeleteServiceTarget] = useState<VendorService | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     const res = await apiRequest<{ vendors: Vendor[]; vendorServices: VendorService[] }>('/api/vendors');
@@ -467,6 +563,47 @@ export function VendorsPage() {
     notify('Layanan armada vendor ditambahkan (terpisah dari aset sekolah).', 'success');
     setSvcModalOpen(false);
     await load();
+  };
+
+  const handleConfirmDeleteVendor = async (force: boolean) => {
+    if (!deleteVendorTarget) return;
+    setDeleting(true);
+    try {
+      const res = await deleteWithOAuthRetry<{ softDeleted: boolean }>(
+        `/api/vendors/${deleteVendorTarget.vendor_id}${force ? '?force=true' : ''}`,
+        reauthorizeGoogleWorkspace
+      );
+      notify(
+        res.softDeleted
+          ? 'Vendor dinonaktifkan karena memiliki riwayat penawaran/order. Centang "Hapus permanen" jika ingin menghapus baris.'
+          : 'Vendor berhasil dihapus.',
+        res.softDeleted ? 'info' : 'success'
+      );
+      setDeleteVendorTarget(null);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus vendor.', 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleConfirmDeleteService = async () => {
+    if (!deleteServiceTarget) return;
+    setDeleting(true);
+    try {
+      await deleteWithOAuthRetry<{ ok: boolean }>(
+        `/api/vendor-services/${deleteServiceTarget.service_id}`,
+        reauthorizeGoogleWorkspace
+      );
+      notify('Layanan armada vendor dihapus.', 'success');
+      setDeleteServiceTarget(null);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus layanan vendor.', 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const vendorMap = new Map(vendors.map((v) => [v.vendor_id, v.company_name]));
@@ -531,7 +668,7 @@ export function VendorsPage() {
                   </td>
                   <td className="px-4 py-3 text-xs">{v.service_types.join(', ')}</td>
                   <td className="px-4 py-3"><StatusLabel status={v.active_status} /></td>
-                  <td className="px-4 py-3 text-right">
+                  <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
                     <Button
                       size="sm"
                       variant="ghost"
@@ -542,6 +679,14 @@ export function VendorsPage() {
                       }}
                     >
                       Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDeleteVendorTarget(v)}
+                      title="Hapus Vendor"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
                     </Button>
                   </td>
                 </tr>
@@ -565,16 +710,27 @@ export function VendorsPage() {
                 <th className="px-4 py-3 font-medium">Kapasitas</th>
                 <th className="px-4 py-3 font-medium">Tarif Dasar</th>
                 <th className="px-4 py-3 font-medium">Fasilitas</th>
+                <th className="px-4 py-3 font-medium text-right">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {services.map((s) => (
-                <tr key={s.service_id}>
+                <tr key={s.service_id} className="hover:bg-slate-50">
                   <td className="px-4 py-3 text-xs font-medium">{vendorMap.get(s.vendor_id) || '-'}</td>
                   <td className="px-4 py-3 text-xs font-semibold text-slate-900">{s.vehicle_type}</td>
                   <td className="px-4 py-3 text-xs tabular-nums">{s.seat_capacity} kursi</td>
                   <td className="px-4 py-3 text-xs font-mono tabular-nums">{formatIdr(s.base_rate)}</td>
                   <td className="px-4 py-3 text-xs text-slate-600">{s.facilities}</td>
+                  <td className="px-4 py-3 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDeleteServiceTarget(s)}
+                      title="Hapus Layanan Vendor"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                    </Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -686,16 +842,38 @@ export function VendorsPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteVendorTarget)}
+        onOpenChange={(open) => !open && setDeleteVendorTarget(null)}
+        title="Hapus Master Vendor"
+        itemName={deleteVendorTarget?.company_name || ''}
+        allowForceDelete
+        loading={deleting}
+        onConfirm={handleConfirmDeleteVendor}
+      />
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteServiceTarget)}
+        onOpenChange={(open) => !open && setDeleteServiceTarget(null)}
+        title="Hapus Layanan Armada Vendor"
+        itemName={deleteServiceTarget?.vehicle_type || ''}
+        loading={deleting}
+        onConfirm={handleConfirmDeleteService}
+      />
     </div>
   );
 }
 
 export function VehicleTypesPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [rows, setRows] = useState<VehicleType[]>([]);
   const [activeTab, setActiveTab] = useState<'ALL' | 'INTERNAL' | 'EKSTERNAL'>('ALL');
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<VehicleType | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState<Partial<VehicleType>>({
     category: 'Internal',
     active_status: 'aktif',
@@ -768,6 +946,29 @@ export function VehicleTypesPage() {
     }
   };
 
+  const handleConfirmDelete = async (force: boolean) => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const res = await deleteWithOAuthRetry<{ softDeleted: boolean }>(
+        `/api/vehicle-types/${deleteTarget.vehicle_type_id}${force ? '?force=true' : ''}`,
+        reauthorizeGoogleWorkspace
+      );
+      notify(
+        res.softDeleted
+          ? 'Jenis kendaraan dinonaktifkan karena sudah digunakan di armada/pengajuan. Centang "Hapus permanen" jika ingin menghapus baris.'
+          : `Jenis kendaraan ${deleteTarget.name} berhasil dihapus.`,
+        res.softDeleted ? 'info' : 'success'
+      );
+      setDeleteTarget(null);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus jenis kendaraan.', 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const renderTable = (items: VehicleType[]) => (
     <table className="w-full text-left text-sm">
       <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
@@ -808,6 +1009,14 @@ export function VehicleTypesPage() {
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => void toggleStatus(t)}>
                     {t.active_status === 'aktif' ? 'Nonaktifkan' : 'Aktifkan'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setDeleteTarget(t)}
+                    title="Hapus Jenis Kendaraan"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-red-600" />
                   </Button>
                 </div>
               </td>
@@ -979,15 +1188,28 @@ export function VehicleTypesPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Jenis Kendaraan"
+        itemName={deleteTarget ? `${deleteTarget.code} — ${deleteTarget.name}` : ''}
+        allowForceDelete
+        loading={deleting}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }
 
 export function AdminUsersPage() {
+  const { user, reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [admins, setAdmins] = useState<AdminUser[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState({ name: '', email: '', role: 'GA Admin' as AdminUser['role'] });
+  const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     const res = await apiRequest<{ adminUsers: AdminUser[] }>('/api/admin-users');
@@ -1019,6 +1241,24 @@ export function AdminUsersPage() {
     await load();
   };
 
+  const handleConfirmDeleteAdmin = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await deleteWithOAuthRetry<{ ok: boolean }>(
+        `/api/admin-users/${deleteTarget.id}`,
+        reauthorizeGoogleWorkspace
+      );
+      notify(`Akun Administrator ${deleteTarget.email} dihapus.`, 'success');
+      setDeleteTarget(null);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus administrator.', 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex justify-between items-center">
@@ -1044,19 +1284,31 @@ export function AdminUsersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {admins.map((a) => (
-                <tr key={a.id}>
-                  <td className="px-4 py-3 text-xs font-semibold text-slate-900">{a.name}</td>
-                  <td className="px-4 py-3 text-xs font-mono">{a.email}</td>
-                  <td className="px-4 py-3 text-xs">{a.role}</td>
-                  <td className="px-4 py-3"><StatusLabel status={a.status} /></td>
-                  <td className="px-4 py-3 text-right">
-                    <Button size="sm" variant="outline" onClick={() => void toggleStatus(a)}>
-                      {a.status === 'aktif' ? 'Nonaktifkan' : 'Aktifkan'}
-                    </Button>
-                  </td>
-                </tr>
-              ))}
+              {admins.map((a) => {
+                const isSelf = a.email.toLowerCase() === (user?.email || '').toLowerCase();
+                return (
+                  <tr key={a.id}>
+                    <td className="px-4 py-3 text-xs font-semibold text-slate-900">{a.name}</td>
+                    <td className="px-4 py-3 text-xs font-mono">{a.email}</td>
+                    <td className="px-4 py-3 text-xs">{a.role}</td>
+                    <td className="px-4 py-3"><StatusLabel status={a.status} /></td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
+                      <Button size="sm" variant="outline" onClick={() => void toggleStatus(a)}>
+                        {a.status === 'aktif' ? 'Nonaktifkan' : 'Aktifkan'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={isSelf}
+                        onClick={() => setDeleteTarget(a)}
+                        title={isSelf ? 'Akun yang sedang digunakan tidak bisa dihapus' : 'Hapus Administrator'}
+                      >
+                        <Trash2 className={`h-3.5 w-3.5 ${isSelf ? 'text-slate-300' : 'text-red-600'}`} />
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </CardContent>
@@ -1092,6 +1344,16 @@ export function AdminUsersPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Akun Administrator"
+        itemName={deleteTarget ? `${deleteTarget.name} (${deleteTarget.email} — ${deleteTarget.role})` : ''}
+        description="Akses Administrator untuk akun Google ini akan dihapus permanen dari daftar pengelola."
+        loading={deleting}
+        onConfirm={handleConfirmDeleteAdmin}
+      />
     </div>
   );
 }

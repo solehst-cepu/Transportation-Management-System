@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Eye, Plus, Search, ShieldAlert, Truck, Upload } from 'lucide-react';
-import { apiRequest, uploadAssetFile } from '../lib/api.ts';
+import { Eye, Plus, Search, ShieldAlert, Trash2, Truck, Upload } from 'lucide-react';
+import { useAuth } from '../context/AuthContext.tsx';
+import { ApiError, apiRequest, uploadAssetFile } from '../lib/api.ts';
+import { ConfirmDeleteDialog } from '../components/ConfirmDeleteDialog.tsx';
 import { Department, Driver, Vehicle, VehicleType } from '../../shared/types.ts';
 import { Card, CardContent } from '../components/ui/card.tsx';
 import { Button } from '../components/ui/button.tsx';
@@ -22,6 +24,7 @@ const PHOTO_PRESETS = [
 ];
 
 export function VehiclesPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>([]);
@@ -33,6 +36,8 @@ export function VehiclesPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<Partial<Vehicle>>({});
+  const [deleteTarget, setDeleteTarget] = useState<Vehicle | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -123,6 +128,42 @@ export function VehiclesPage() {
       await loadData();
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Gagal menyimpan kendaraan.', 'error');
+    }
+  };
+
+  const handleConfirmDelete = async (force: boolean) => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const doDelete = () =>
+        apiRequest<{ softDeleted: boolean }>(
+          `/api/vehicles/${deleteTarget.vehicle_id}${force ? '?force=true' : ''}`,
+          { method: 'DELETE' }
+        );
+      let res: { softDeleted: boolean };
+      try {
+        res = await doDelete();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const token = await reauthorizeGoogleWorkspace();
+          if (!token) throw err;
+          res = await doDelete();
+        } else {
+          throw err;
+        }
+      }
+      notify(
+        res.softDeleted
+          ? 'Kendaraan dinonaktifkan karena memiliki riwayat transaksi. Centang "Hapus permanen" jika ingin menghapus baris sepenuhnya.'
+          : `Kendaraan ${deleteTarget.plate_number} berhasil dihapus.`,
+        res.softDeleted ? 'info' : 'success'
+      );
+      setDeleteTarget(null);
+      await loadData();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus kendaraan.', 'error');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -229,6 +270,14 @@ export function VehiclesPage() {
                       </Button>
                       <Button variant="ghost" size="sm" onClick={() => openEdit(v)}>
                         Edit
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDeleteTarget(v)}
+                        title="Hapus Kendaraan"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-red-600" />
                       </Button>
                     </td>
                   </tr>
@@ -454,6 +503,16 @@ export function VehiclesPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Master Kendaraan"
+        itemName={deleteTarget ? `${deleteTarget.plate_number} — ${deleteTarget.vehicle_name}` : ''}
+        allowForceDelete
+        loading={deleting}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }

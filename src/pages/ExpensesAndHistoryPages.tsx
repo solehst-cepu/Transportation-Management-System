@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, FileSpreadsheet, Plus, Trash2 } from 'lucide-react';
-import { apiRequest } from '../lib/api.ts';
+import { useAuth } from '../context/AuthContext.tsx';
+import { ApiError, apiRequest } from '../lib/api.ts';
+import { ConfirmDeleteDialog } from '../components/ConfirmDeleteDialog.tsx';
 import { exportExpensesExcel, exportExpensesPdf } from '../lib/pdfExport.ts';
 import { formatDateTimeWib, formatDateWib, formatIdr } from '../lib/utils.ts';
 import { Expense, ExpenseCategory, Vehicle, VehicleHistory } from '../../shared/types.ts';
@@ -16,11 +18,14 @@ import {
 import { useToast } from '../components/ui/toast.tsx';
 
 export function ExpensesPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
   const { notify } = useToast();
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [filterVehicle, setFilterVehicle] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Expense | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [form, setForm] = useState({
     vehicle_id: '',
@@ -65,10 +70,31 @@ export function ExpensesPage() {
     await loadAll();
   };
 
-  const handleDelete = async (id: string) => {
-    await apiRequest(`/api/expenses/${id}`, { method: 'DELETE' });
-    notify('Catatan biaya dihapus.', 'info');
-    await loadAll();
+  const handleConfirmDeleteExpense = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const doDelete = () =>
+        apiRequest(`/api/expenses/${deleteTarget.expense_id}`, { method: 'DELETE' });
+      try {
+        await doDelete();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const token = await reauthorizeGoogleWorkspace();
+          if (!token) throw err;
+          await doDelete();
+        } else {
+          throw err;
+        }
+      }
+      notify('Catatan biaya dihapus.', 'success');
+      setDeleteTarget(null);
+      await loadAll();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus catatan biaya.', 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -141,15 +167,14 @@ export function ExpensesPage() {
                       {formatIdr(exp.amount)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {exp.reference_type === 'MANUAL' && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => void handleDelete(exp.expense_id)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                        </Button>
-                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setDeleteTarget(exp)}
+                        title="Hapus Catatan Biaya"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                      </Button>
                     </td>
                   </tr>
                 );
@@ -251,28 +276,69 @@ export function ExpensesPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Catatan Biaya"
+        itemName={deleteTarget ? `${deleteTarget.category} — ${deleteTarget.description}` : ''}
+        loading={deleting}
+        onConfirm={handleConfirmDeleteExpense}
+      />
     </div>
   );
 }
 
 export function VehicleHistoryPage() {
+  const { reauthorizeGoogleWorkspace } = useAuth();
+  const { notify } = useToast();
   const [history, setHistory] = useState<VehicleHistory[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [filterVehicle, setFilterVehicle] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<VehicleHistory | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    Promise.all([
+  const loadHistory = useCallback(async () => {
+    const [hRes, vRes] = await Promise.all([
       apiRequest<{ history: VehicleHistory[] }>('/api/vehicle-history'),
       apiRequest<{ vehicles: Vehicle[] }>('/api/vehicles'),
-    ])
-      .then(([hRes, vRes]) => {
-        setHistory(hRes.history);
-        setVehicles(vRes.vehicles);
-      })
-      .catch(() => {
-        // Handled globally on 401
-      });
+    ]);
+    setHistory(hRes.history);
+    setVehicles(vRes.vehicles);
   }, []);
+
+  useEffect(() => {
+    loadHistory().catch(() => {
+      // Handled globally on 401
+    });
+  }, [loadHistory]);
+
+  const handleConfirmDeleteHistory = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const doDelete = () =>
+        apiRequest(`/api/vehicle-history/${deleteTarget.history_id}`, { method: 'DELETE' });
+      try {
+        await doDelete();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const token = await reauthorizeGoogleWorkspace();
+          if (!token) throw err;
+          await doDelete();
+        } else {
+          throw err;
+        }
+      }
+      notify('Log riwayat kendaraan dihapus.', 'success');
+      setDeleteTarget(null);
+      await loadHistory();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menghapus log riwayat.', 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const vehMap = new Map(vehicles.map((v) => [v.vehicle_id, v]));
   const rows = history.filter((h) => !filterVehicle || h.vehicle_id === filterVehicle);
@@ -307,14 +373,33 @@ export function VehicleHistoryPage() {
                   </div>
                   <div className="text-xs text-slate-600 mt-0.5">{h.summary}</div>
                 </div>
-                <div className="text-[11px] text-slate-400 tabular-nums shrink-0">
-                  {formatDateTimeWib(h.occurred_at)} · {h.actor_name}
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="text-[11px] text-slate-400 tabular-nums">
+                    {formatDateTimeWib(h.occurred_at)} · {h.actor_name}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setDeleteTarget(h)}
+                    title="Hapus Log Riwayat"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                  </Button>
                 </div>
               </div>
             );
           })}
         </CardContent>
       </Card>
+
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Hapus Log Riwayat Kendaraan"
+        itemName={deleteTarget ? `${deleteTarget.activity_type} — ${deleteTarget.summary}` : ''}
+        loading={deleting}
+        onConfirm={handleConfirmDeleteHistory}
+      />
     </div>
   );
 }

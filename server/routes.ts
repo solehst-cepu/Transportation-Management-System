@@ -463,33 +463,49 @@ apiRouter.put('/departments/:id', requireAuth, requireRole('ADMIN'), async (req:
 });
 
 apiRouter.delete('/departments/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  const result = await dbStore.mutate(['DEPARTMENTS', 'AUDIT_LOGS'], (db) => {
-    const dept = db.DEPARTMENTS.find((d) => d.department_id === req.params.id);
-    if (!dept) return null;
-    const hasHistory =
-      db.BOOKINGS.some((b) => b.department_id === req.params.id) ||
-      db.USERS.some((u) => u.department_id === req.params.id);
-    if (hasHistory) {
-      dept.active_status = 'nonaktif';
-      appendAuditLog(
-        db,
-        req.sessionUser!,
-        'SOFT_DELETE',
-        'DEPARTMENTS',
-        dept.department_id,
-        `Nonaktifkan unit ${dept.department_name} (memiliki riwayat transaksi)`
-      );
-      return { softDeleted: true, department: dept };
+  try {
+    const force = req.query.force === 'true';
+    const result = await dbStore.mutate(
+      ['DEPARTMENTS', 'AUDIT_LOGS'],
+      (db) => {
+        const dept = db.DEPARTMENTS.find((d) => d.department_id === req.params.id);
+        if (!dept) return null;
+        const hasHistory =
+          db.BOOKINGS.some((b) => b.department_id === req.params.id) ||
+          db.USERS.some((u) => u.department_id === req.params.id);
+        if (hasHistory && !force) {
+          dept.active_status = 'nonaktif';
+          appendAuditLog(
+            db,
+            req.sessionUser!,
+            'SOFT_DELETE',
+            'DEPARTMENTS',
+            dept.department_id,
+            `Nonaktifkan unit ${dept.department_name} (memiliki riwayat transaksi)`
+          );
+          return { softDeleted: true, hasHistory: true, department: dept };
+        }
+        db.DEPARTMENTS = db.DEPARTMENTS.filter((d) => d.department_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'DEPARTMENTS',
+          req.params.id,
+          `Hapus${force && hasHistory ? ' permanen' : ''} unit ${dept.department_name}`
+        );
+        return { softDeleted: false, hasHistory };
+      },
+      { requireRemoteSync: true }
+    );
+    if (!result) {
+      res.status(404).json({ error: 'Unit tidak ditemukan.' });
+      return;
     }
-    db.DEPARTMENTS = db.DEPARTMENTS.filter((d) => d.department_id !== req.params.id);
-    appendAuditLog(db, req.sessionUser!, 'DELETE', 'DEPARTMENTS', req.params.id, `Hapus unit ${dept.department_name}`);
-    return { softDeleted: false };
-  });
-  if (!result) {
-    res.status(404).json({ error: 'Unit tidak ditemukan.' });
-    return;
+    res.json(result);
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus unit.');
   }
-  res.json(result);
 });
 
 // ========================
@@ -570,6 +586,53 @@ apiRouter.put('/vehicle-types/:id', requireAuth, requireRole('ADMIN'), async (re
     res.json({ vehicleType: updated });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal memperbarui jenis kendaraan.' });
+  }
+});
+
+apiRouter.delete('/vehicle-types/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
+  try {
+    const force = req.query.force === 'true';
+    const result = await dbStore.mutate(
+      ['VEHICLE_TYPES', 'AUDIT_LOGS'],
+      (db) => {
+        const vt = db.VEHICLE_TYPES.find((t) => t.vehicle_type_id === req.params.id);
+        if (!vt) return null;
+        const hasHistory =
+          db.VEHICLES.some((v) => v.vehicle_type_id === req.params.id) ||
+          db.BOOKINGS.some((b) => b.requested_vehicle_type_id === req.params.id) ||
+          db.DRIVERS.some((d) => d.eligible_vehicle_type_ids.includes(req.params.id));
+        if (hasHistory && !force) {
+          vt.active_status = 'nonaktif';
+          appendAuditLog(
+            db,
+            req.sessionUser!,
+            'SOFT_DELETE',
+            'VEHICLE_TYPES',
+            vt.vehicle_type_id,
+            `Nonaktifkan jenis kendaraan ${vt.name} (memiliki riwayat transaksi)`
+          );
+          return { softDeleted: true, hasHistory: true, vehicleType: vt };
+        }
+        db.VEHICLE_TYPES = db.VEHICLE_TYPES.filter((t) => t.vehicle_type_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'VEHICLE_TYPES',
+          req.params.id,
+          `Hapus${force && hasHistory ? ' permanen' : ''} jenis kendaraan ${vt.name}`
+        );
+        return { softDeleted: false, hasHistory };
+      },
+      { requireRemoteSync: true }
+    );
+    if (!result) {
+      res.status(404).json({ error: 'Jenis kendaraan tidak ditemukan.' });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus jenis kendaraan.');
   }
 });
 
@@ -777,36 +840,52 @@ apiRouter.post('/vehicles/:id/verify-eligibility', requireAuth, requireRole('ADM
 });
 
 apiRouter.delete('/vehicles/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  const result = await dbStore.mutate(['VEHICLES', 'AUDIT_LOGS'], (db) => {
-    const vehicle = db.VEHICLES.find((v) => v.vehicle_id === req.params.id);
-    if (!vehicle) return null;
-    const hasHistory =
-      db.BOOKINGS.some((b) => b.allocated_vehicle_ids.includes(vehicle.vehicle_id)) ||
-      db.INSPECTIONS.some((i) => i.vehicle_id === vehicle.vehicle_id) ||
-      db.REPAIRS.some((r) => r.vehicle_id === vehicle.vehicle_id) ||
-      db.EXPENSES.some((e) => e.vehicle_id === vehicle.vehicle_id);
-    if (hasHistory) {
-      vehicle.admin_status = 'tidak_aktif';
-      vehicle.updated_at = new Date().toISOString();
-      appendAuditLog(
-        db,
-        req.sessionUser!,
-        'SOFT_DELETE',
-        'VEHICLES',
-        vehicle.vehicle_id,
-        `Nonaktifkan kendaraan ${vehicle.plate_number} (memiliki riwayat transaksi)`
-      );
-      return { softDeleted: true, vehicle };
+  try {
+    const force = req.query.force === 'true';
+    const result = await dbStore.mutate(
+      ['VEHICLES', 'AUDIT_LOGS'],
+      (db) => {
+        const vehicle = db.VEHICLES.find((v) => v.vehicle_id === req.params.id);
+        if (!vehicle) return null;
+        const hasHistory =
+          db.BOOKINGS.some((b) => b.allocated_vehicle_ids.includes(vehicle.vehicle_id)) ||
+          db.INSPECTIONS.some((i) => i.vehicle_id === vehicle.vehicle_id) ||
+          db.REPAIRS.some((r) => r.vehicle_id === vehicle.vehicle_id) ||
+          db.EXPENSES.some((e) => e.vehicle_id === vehicle.vehicle_id);
+        if (hasHistory && !force) {
+          vehicle.admin_status = 'tidak_aktif';
+          vehicle.updated_at = new Date().toISOString();
+          appendAuditLog(
+            db,
+            req.sessionUser!,
+            'SOFT_DELETE',
+            'VEHICLES',
+            vehicle.vehicle_id,
+            `Nonaktifkan kendaraan ${vehicle.plate_number} (memiliki riwayat transaksi)`
+          );
+          return { softDeleted: true, hasHistory: true, vehicle };
+        }
+        db.VEHICLES = db.VEHICLES.filter((v) => v.vehicle_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'VEHICLES',
+          req.params.id,
+          `Hapus${force && hasHistory ? ' permanen' : ''} kendaraan ${vehicle.plate_number}`
+        );
+        return { softDeleted: false, hasHistory };
+      },
+      { requireRemoteSync: true }
+    );
+    if (!result) {
+      res.status(404).json({ error: 'Kendaraan tidak ditemukan.' });
+      return;
     }
-    db.VEHICLES = db.VEHICLES.filter((v) => v.vehicle_id !== req.params.id);
-    appendAuditLog(db, req.sessionUser!, 'DELETE', 'VEHICLES', req.params.id, `Hapus kendaraan ${vehicle.plate_number}`);
-    return { softDeleted: false };
-  });
-  if (!result) {
-    res.status(404).json({ error: 'Kendaraan tidak ditemukan.' });
-    return;
+    res.json(result);
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus kendaraan.');
   }
-  res.json(result);
 });
 
 // ========================
@@ -870,24 +949,47 @@ apiRouter.put('/drivers/:id', requireAuth, requireRole('ADMIN'), async (req: Aut
 });
 
 apiRouter.delete('/drivers/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  const result = await dbStore.mutate(['DRIVERS', 'AUDIT_LOGS'], (db) => {
-    const drv = db.DRIVERS.find((d) => d.driver_id === req.params.id);
-    if (!drv) return null;
-    const hasHistory = db.BOOKINGS.some((b) => b.allocated_driver_ids.includes(drv.driver_id));
-    if (hasHistory) {
-      drv.active_status = 'nonaktif';
-      appendAuditLog(db, req.sessionUser!, 'SOFT_DELETE', 'DRIVERS', drv.driver_id, `Nonaktifkan pengemudi ${drv.full_name}`);
-      return { softDeleted: true, driver: drv };
+  try {
+    const force = req.query.force === 'true';
+    const result = await dbStore.mutate(
+      ['DRIVERS', 'AUDIT_LOGS'],
+      (db) => {
+        const drv = db.DRIVERS.find((d) => d.driver_id === req.params.id);
+        if (!drv) return null;
+        const hasHistory = db.BOOKINGS.some((b) => b.allocated_driver_ids.includes(drv.driver_id));
+        if (hasHistory && !force) {
+          drv.active_status = 'nonaktif';
+          appendAuditLog(
+            db,
+            req.sessionUser!,
+            'SOFT_DELETE',
+            'DRIVERS',
+            drv.driver_id,
+            `Nonaktifkan pengemudi ${drv.full_name} (memiliki riwayat transaksi)`
+          );
+          return { softDeleted: true, hasHistory: true, driver: drv };
+        }
+        db.DRIVERS = db.DRIVERS.filter((d) => d.driver_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'DRIVERS',
+          req.params.id,
+          `Hapus${force && hasHistory ? ' permanen' : ''} pengemudi ${drv.full_name}`
+        );
+        return { softDeleted: false, hasHistory };
+      },
+      { requireRemoteSync: true }
+    );
+    if (!result) {
+      res.status(404).json({ error: 'Pengemudi tidak ditemukan.' });
+      return;
     }
-    db.DRIVERS = db.DRIVERS.filter((d) => d.driver_id !== req.params.id);
-    appendAuditLog(db, req.sessionUser!, 'DELETE', 'DRIVERS', req.params.id, `Hapus pengemudi ${drv.full_name}`);
-    return { softDeleted: false };
-  });
-  if (!result) {
-    res.status(404).json({ error: 'Pengemudi tidak ditemukan.' });
-    return;
+    res.json(result);
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus pengemudi.');
   }
-  res.json(result);
 });
 
 // ========================
@@ -934,26 +1036,50 @@ apiRouter.put('/vendors/:id', requireAuth, requireRole('ADMIN'), async (req: Aut
 });
 
 apiRouter.delete('/vendors/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  const result = await dbStore.mutate(['VENDORS', 'AUDIT_LOGS'], (db) => {
-    const vendor = db.VENDORS.find((v) => v.vendor_id === req.params.id);
-    if (!vendor) return null;
-    const hasHistory =
-      db.VENDOR_QUOTES.some((q) => q.vendor_id === vendor.vendor_id) ||
-      db.BOOKINGS.some((b) => b.selected_vendor_id === vendor.vendor_id);
-    if (hasHistory) {
-      vendor.active_status = 'nonaktif';
-      appendAuditLog(db, req.sessionUser!, 'SOFT_DELETE', 'VENDORS', vendor.vendor_id, `Nonaktifkan vendor ${vendor.company_name}`);
-      return { softDeleted: true, vendor };
+  try {
+    const force = req.query.force === 'true';
+    const result = await dbStore.mutate(
+      ['VENDORS', 'VENDOR_SERVICES', 'AUDIT_LOGS'],
+      (db) => {
+        const vendor = db.VENDORS.find((v) => v.vendor_id === req.params.id);
+        if (!vendor) return null;
+        const hasHistory =
+          db.VENDOR_QUOTES.some((q) => q.vendor_id === vendor.vendor_id) ||
+          db.BOOKINGS.some((b) => b.selected_vendor_id === vendor.vendor_id);
+        if (hasHistory && !force) {
+          vendor.active_status = 'nonaktif';
+          appendAuditLog(
+            db,
+            req.sessionUser!,
+            'SOFT_DELETE',
+            'VENDORS',
+            vendor.vendor_id,
+            `Nonaktifkan vendor ${vendor.company_name} (memiliki riwayat transaksi)`
+          );
+          return { softDeleted: true, hasHistory: true, vendor };
+        }
+        db.VENDORS = db.VENDORS.filter((v) => v.vendor_id !== req.params.id);
+        db.VENDOR_SERVICES = db.VENDOR_SERVICES.filter((s) => s.vendor_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'VENDORS',
+          req.params.id,
+          `Hapus${force && hasHistory ? ' permanen' : ''} vendor ${vendor.company_name}`
+        );
+        return { softDeleted: false, hasHistory };
+      },
+      { requireRemoteSync: true }
+    );
+    if (!result) {
+      res.status(404).json({ error: 'Vendor tidak ditemukan.' });
+      return;
     }
-    db.VENDORS = db.VENDORS.filter((v) => v.vendor_id !== req.params.id);
-    appendAuditLog(db, req.sessionUser!, 'DELETE', 'VENDORS', req.params.id, `Hapus vendor ${vendor.company_name}`);
-    return { softDeleted: false };
-  });
-  if (!result) {
-    res.status(404).json({ error: 'Vendor tidak ditemukan.' });
-    return;
+    res.json(result);
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus vendor.');
   }
-  res.json(result);
 });
 
 apiRouter.post('/vendor-services', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
@@ -975,10 +1101,33 @@ apiRouter.post('/vendor-services', requireAuth, requireRole('ADMIN'), async (req
 });
 
 apiRouter.delete('/vendor-services/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  await dbStore.mutate(['VENDOR_SERVICES'], (db) => {
-    db.VENDOR_SERVICES = db.VENDOR_SERVICES.filter((s) => s.service_id !== req.params.id);
-  });
-  res.json({ ok: true });
+  try {
+    const deleted = await dbStore.mutate(
+      ['VENDOR_SERVICES', 'AUDIT_LOGS'],
+      (db) => {
+        const svc = db.VENDOR_SERVICES.find((s) => s.service_id === req.params.id);
+        if (!svc) return false;
+        db.VENDOR_SERVICES = db.VENDOR_SERVICES.filter((s) => s.service_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'VENDOR_SERVICES',
+          req.params.id,
+          `Hapus layanan vendor ${svc.vehicle_type}`
+        );
+        return true;
+      },
+      { requireRemoteSync: true }
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Layanan vendor tidak ditemukan.' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus layanan vendor.');
+  }
 });
 
 // ========================
@@ -1046,6 +1195,47 @@ apiRouter.put('/admin-users/:id', requireAuth, requireRole('ADMIN'), async (req:
     res.json({ adminUser: updated });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal memperbarui Administrator.' });
+  }
+});
+
+apiRouter.delete('/admin-users/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
+  try {
+    const deleted = await dbStore.mutate(
+      ['ADMIN_USERS', 'AUDIT_LOGS'],
+      (db) => {
+        const target = db.ADMIN_USERS.find((a) => a.id === req.params.id);
+        if (!target) return null;
+        if (target.email.trim().toLowerCase() === req.sessionUser!.email.trim().toLowerCase()) {
+          throw new Error('Anda tidak dapat menghapus akun Administrator yang sedang Anda gunakan.');
+        }
+        if (target.role === 'Super Admin' && target.status === 'aktif') {
+          const otherActiveSuperAdmins = db.ADMIN_USERS.filter(
+            (a) => a.id !== target.id && a.role === 'Super Admin' && a.status === 'aktif'
+          );
+          if (otherActiveSuperAdmins.length === 0) {
+            throw new Error('Tidak dapat menghapus Super Admin aktif terakhir.');
+          }
+        }
+        db.ADMIN_USERS = db.ADMIN_USERS.filter((a) => a.id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'ADMIN_USERS',
+          req.params.id,
+          `Hapus akun Administrator ${target.email} (${target.role})`
+        );
+        return target;
+      },
+      { requireRemoteSync: true }
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Administrator tidak ditemukan.' });
+      return;
+    }
+    res.json({ ok: true, deleted });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus akun Administrator.');
   }
 });
 
@@ -1843,6 +2033,41 @@ apiRouter.post('/bookings/:id/select-vendor', requireAuth, requireRole('ADMIN'),
   }
 });
 
+// Delete incoming order / booking log (Admin & Super Admin only)
+apiRouter.delete('/bookings/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
+  try {
+    const deleted = await dbStore.mutate(
+      ['BOOKINGS', 'VENDOR_QUOTES', 'AUDIT_LOGS'],
+      (db) => {
+        const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
+        if (!booking) return null;
+        db.BOOKINGS = db.BOOKINGS.filter((b) => b.booking_id !== req.params.id);
+        db.VENDOR_QUOTES = db.VENDOR_QUOTES.filter((q) => q.booking_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'BOOKINGS',
+          booking.booking_id,
+          `Hapus log order ${booking.booking_number} — ${booking.activity_name} (${booking.requester_email})`
+        );
+        return {
+          booking_id: booking.booking_id,
+          booking_number: booking.booking_number,
+        };
+      },
+      { requireRemoteSync: true }
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Log order / pengajuan tidak ditemukan.' });
+      return;
+    }
+    res.json({ ok: true, ...deleted });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus log order.');
+  }
+});
+
 // ========================
 // INSPECTIONS & TEMPLATES (ADMIN ONLY)
 // ========================
@@ -2514,11 +2739,33 @@ apiRouter.post('/expenses', requireAuth, requireRole('ADMIN'), async (req: Authe
 });
 
 apiRouter.delete('/expenses/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  await dbStore.mutate(['EXPENSES', 'AUDIT_LOGS'], (db) => {
-    db.EXPENSES = db.EXPENSES.filter((e) => e.expense_id !== req.params.id);
-    appendAuditLog(db, req.sessionUser!, 'DELETE_EXPENSE', 'EXPENSES', req.params.id, `Hapus catatan biaya ${req.params.id}`);
-  });
-  res.json({ ok: true });
+  try {
+    const deleted = await dbStore.mutate(
+      ['EXPENSES', 'AUDIT_LOGS'],
+      (db) => {
+        const exp = db.EXPENSES.find((e) => e.expense_id === req.params.id);
+        if (!exp) return false;
+        db.EXPENSES = db.EXPENSES.filter((e) => e.expense_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE_EXPENSE',
+          'EXPENSES',
+          req.params.id,
+          `Hapus catatan biaya ${exp.category} (${exp.description})`
+        );
+        return true;
+      },
+      { requireRemoteSync: true }
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Catatan biaya tidak ditemukan.' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus catatan biaya.');
+  }
 });
 
 apiRouter.get('/vehicle-history', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
@@ -2528,6 +2775,36 @@ apiRouter.get('/vehicle-history', requireAuth, requireRole('ADMIN'), async (req:
     ? db.VEHICLE_HISTORY.filter((h) => h.vehicle_id === vehicle_id)
     : db.VEHICLE_HISTORY;
   res.json({ history: rows });
+});
+
+apiRouter.delete('/vehicle-history/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
+  try {
+    const deleted = await dbStore.mutate(
+      ['VEHICLE_HISTORY', 'AUDIT_LOGS'],
+      (db) => {
+        const item = db.VEHICLE_HISTORY.find((h) => h.history_id === req.params.id);
+        if (!item) return false;
+        db.VEHICLE_HISTORY = db.VEHICLE_HISTORY.filter((h) => h.history_id !== req.params.id);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'DELETE',
+          'VEHICLE_HISTORY',
+          req.params.id,
+          `Hapus log riwayat kendaraan (${item.activity_type}: ${item.summary})`
+        );
+        return true;
+      },
+      { requireRemoteSync: true }
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Log riwayat kendaraan tidak ditemukan.' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus log riwayat kendaraan.');
+  }
 });
 
 // ========================
@@ -2666,6 +2943,28 @@ apiRouter.put('/settings', requireAuth, requireRole('ADMIN'), async (req: Authed
 apiRouter.get('/audit-logs', requireAuth, requireRole('ADMIN'), async (_req: AuthedRequest, res: Response) => {
   const db = await dbStore.getSnapshot();
   res.json({ auditLogs: db.AUDIT_LOGS.slice(0, 200) });
+});
+
+apiRouter.delete('/audit-logs/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
+  try {
+    const deleted = await dbStore.mutate(
+      ['AUDIT_LOGS'],
+      (db) => {
+        const exists = db.AUDIT_LOGS.some((l) => l.log_id === req.params.id);
+        if (!exists) return false;
+        db.AUDIT_LOGS = db.AUDIT_LOGS.filter((l) => l.log_id !== req.params.id);
+        return true;
+      },
+      { requireRemoteSync: true }
+    );
+    if (!deleted) {
+      res.status(404).json({ error: 'Log audit tidak ditemukan.' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menghapus log audit.');
+  }
 });
 
 // ========================
