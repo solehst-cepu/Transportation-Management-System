@@ -144,9 +144,10 @@ function createInitialSeed(): DatabaseSnapshot {
   const deptIT = 'dept-it-007';
   const deptMgmt = 'dept-mgmt-008';
 
-  const typeMPV = 'vtype-mpv-001';
-  const typeVan = 'vtype-van-002';
-  const typeMedBus = 'vtype-mbus-003';
+  const typeInnova = 'vtype-opr-01';
+  const typeHiace = 'vtype-opr-02';
+  const typeElfBus = 'vtype-bus-01';
+  const typeVeloz = 'vtype-opr-03';
   const typeBigBus = 'vtype-bbus-004';
 
   const drv1 = 'drv-001';
@@ -282,35 +283,45 @@ function createInitialSeed(): DatabaseSnapshot {
       },
     ],
     VEHICLE_TYPES: [
-      // Kendaraan Operasional Sekolah (Internal)
+      // Kendaraan Operasional Sekolah (Sinkron 1-to-1 dengan Data Kendaraan Sekolah di TMS)
       {
-        vehicle_type_id: typeMPV,
-        code: 'MPV',
-        name: 'MPV Operasional (7 Seat)',
+        vehicle_type_id: typeInnova,
+        code: 'LZ-OPR-01',
+        name: 'Toyota Innova Zenix 2.0 G',
         category: 'Internal',
         default_capacity: 7,
         required_sim: 'SIM A',
-        description: 'Kendaraan operasional harian sekolah untuk kunjungan dinas dan logistik ringan.',
+        description: 'B 1842 LZD · Kendaraan operasional utama dinas sekolah.',
         active_status: 'aktif',
       },
       {
-        vehicle_type_id: typeVan,
-        code: 'VAN',
-        name: 'Minibus / Hiace Commuter (14 Seat)',
+        vehicle_type_id: typeHiace,
+        code: 'LZ-OPR-02',
+        name: 'Toyota Hiace Commuter',
         category: 'Internal',
         default_capacity: 14,
         required_sim: 'SIM A Umum',
-        description: 'Minibus sekolah untuk lomba, kunjungan edukatif, dan antar-jemput.',
+        description: 'B 7291 LZD · Armada rombongan lomba siswa & studi lapangan.',
         active_status: 'aktif',
       },
       {
-        vehicle_type_id: typeMedBus,
-        code: 'MBUS',
-        name: 'Medium Bus Sekolah (30 Seat)',
+        vehicle_type_id: typeElfBus,
+        code: 'LZ-BUS-01',
+        name: 'Isuzu Elf NMR Medium School Bus',
         category: 'Internal',
         default_capacity: 30,
         required_sim: 'SIM B1 Umum',
-        description: 'Bus sedang operasional milik sekolah untuk field trip kelas.',
+        description: 'B 7033 LZD · Bus antar-jemput dan field trip sekolah.',
+        active_status: 'aktif',
+      },
+      {
+        vehicle_type_id: typeVeloz,
+        code: 'LZ-OPR-03',
+        name: 'Toyota Avanza Veloz 1.5 Q',
+        category: 'Internal',
+        default_capacity: 7,
+        required_sim: 'SIM A',
+        description: 'B 2190 LZD · Operasional harian unit TK & SD.',
         active_status: 'aktif',
       },
       // Kendaraan Sewa / Bus Eksternal (Eksternal)
@@ -383,7 +394,7 @@ function createInitialSeed(): DatabaseSnapshot {
         phone: '0812-3401-9910',
         sim_type: 'SIM B1 Umum',
         sim_expiry: daysFromNowIso(420),
-        eligible_vehicle_type_ids: [typeMPV, typeVan, typeMedBus],
+        eligible_vehicle_type_ids: [typeInnova, typeHiace, typeElfBus, typeVeloz],
         active_status: 'aktif',
         notes: 'Pengemudi senior operasional bus dan MPV.',
       },
@@ -394,7 +405,7 @@ function createInitialSeed(): DatabaseSnapshot {
         phone: '0813-8820-4511',
         sim_type: 'SIM A Umum',
         sim_expiry: daysFromNowIso(280),
-        eligible_vehicle_type_ids: [typeMPV, typeVan],
+        eligible_vehicle_type_ids: [typeInnova, typeHiace, typeVeloz],
         active_status: 'aktif',
         notes: 'Pengemudi utama Hiace Commuter dan Innova.',
       },
@@ -405,7 +416,7 @@ function createInitialSeed(): DatabaseSnapshot {
         phone: '0815-1102-7732',
         sim_type: 'SIM A',
         sim_expiry: daysFromNowIso(150),
-        eligible_vehicle_type_ids: [typeMPV],
+        eligible_vehicle_type_ids: [typeInnova, typeVeloz],
         active_status: 'aktif',
         notes: 'Pengemudi operasional tamu dan dinas manajemen.',
       },
@@ -418,7 +429,7 @@ function createInitialSeed(): DatabaseSnapshot {
         plate_number: 'B 1842 LZD',
         brand: 'Toyota',
         model: 'Innova Zenix',
-        vehicle_type_id: typeMPV,
+        vehicle_type_id: typeInnova,
         manufacture_year: 2024,
         registration_year: 2024,
         color: 'Putih Mutiara',
@@ -465,7 +476,7 @@ function createInitialSeed(): DatabaseSnapshot {
         plate_number: 'B 7291 LZD',
         brand: 'Toyota',
         model: 'Hiace Commuter',
-        vehicle_type_id: typeVan,
+        vehicle_type_id: typeHiace,
         manufacture_year: 2023,
         registration_year: 2023,
         color: 'Putih',
@@ -512,7 +523,7 @@ function createInitialSeed(): DatabaseSnapshot {
         plate_number: 'B 7033 LZD',
         brand: 'Isuzu',
         model: 'Elf NMR 71 Bus',
-        vehicle_type_id: typeMedBus,
+        vehicle_type_id: typeElfBus,
         manufacture_year: 2022,
         registration_year: 2022,
         color: 'Biru Lazuardi / Putih',
@@ -559,7 +570,7 @@ function createInitialSeed(): DatabaseSnapshot {
         plate_number: 'B 2190 LZD',
         brand: 'Toyota',
         model: 'Veloz 1.5 Q',
-        vehicle_type_id: typeMPV,
+        vehicle_type_id: typeVeloz,
         manufacture_year: 2023,
         registration_year: 2023,
         color: 'Putih',
@@ -661,7 +672,7 @@ function createInitialSeed(): DatabaseSnapshot {
         departure_at: `${daysFromNowIso(2)}T07:00`,
         return_at: `${daysFromNowIso(2)}T15:30`,
         passenger_count: 11,
-        requested_vehicle_type_id: typeVan,
+        requested_vehicle_type_id: typeHiace,
         needs_driver: true,
         pic_name: 'Nadia Putri, S.Pd',
         contact_phone: '0812-8834-2100',
@@ -718,7 +729,7 @@ function createInitialSeed(): DatabaseSnapshot {
         departure_at: `${daysFromNowIso(4)}T08:30`,
         return_at: `${daysFromNowIso(4)}T14:00`,
         passenger_count: 4,
-        requested_vehicle_type_id: typeMPV,
+        requested_vehicle_type_id: typeInnova,
         needs_driver: true,
         pic_name: 'Rizky Pratama, M.Pd',
         contact_phone: '0813-9901-4420',
@@ -1540,15 +1551,8 @@ export class LvbmsDataStore {
     let changed = false;
     const seedTypes = createInitialSeed().VEHICLE_TYPES;
 
-    // Upgrade legacy seed school types from 'Keduanya' to 'Internal'
+    // 1. Upgrade legacy external type if needed
     for (const vt of snapshot.VEHICLE_TYPES) {
-      if (
-        ['vtype-mpv-001', 'vtype-van-002', 'vtype-mbus-003'].includes(vt.vehicle_type_id) &&
-        vt.category === 'Keduanya'
-      ) {
-        vt.category = 'Internal';
-        changed = true;
-      }
       if (vt.vehicle_type_id === 'vtype-bbus-004' && vt.code === 'BBUS') {
         vt.code = 'SEWA-BBUS';
         vt.name = 'Big Bus';
@@ -1563,11 +1567,174 @@ export class LvbmsDataStore {
       snapshot.VEHICLE_TYPES.filter((t) => t.category === 'Eksternal').map((t) => t.name.toLowerCase())
     );
     for (const st of seedTypes) {
-      if (st.category === 'Eksternal' && !existingIds.has(st.vehicle_type_id) && !existingExtNames.has(st.name.toLowerCase())) {
+      if (
+        st.category === 'Eksternal' &&
+        !existingIds.has(st.vehicle_type_id) &&
+        !existingExtNames.has(st.name.toLowerCase())
+      ) {
         snapshot.VEHICLE_TYPES.push(st);
         changed = true;
       }
     }
+
+    // 2. Synchronize school operational vehicles (VEHICLES) 1-to-1 with Internal VEHICLE_TYPES
+    const claimedTypeIds = new Set<string>();
+    const legacyGenericIds = new Set(['vtype-mpv-001', 'vtype-van-002', 'vtype-mbus-003']);
+
+    const inferSim = (capacity: number): string => {
+      if (capacity >= 25) return 'SIM B1 Umum';
+      if (capacity >= 10) return 'SIM A Umum';
+      return 'SIM A';
+    };
+
+    for (const veh of snapshot.VEHICLES) {
+      let vt = snapshot.VEHICLE_TYPES.find(
+        (t) =>
+          t.category !== 'Eksternal' &&
+          !claimedTypeIds.has(t.vehicle_type_id) &&
+          t.vehicle_type_id === veh.vehicle_type_id
+      );
+
+      if (!vt) {
+        vt = snapshot.VEHICLE_TYPES.find(
+          (t) =>
+            t.category !== 'Eksternal' &&
+            !claimedTypeIds.has(t.vehicle_type_id) &&
+            t.code.trim().toUpperCase() === veh.vehicle_code.trim().toUpperCase()
+        );
+      }
+
+      if (vt) {
+        claimedTypeIds.add(vt.vehicle_type_id);
+        const targetStatus = veh.admin_status === 'aktif' ? 'aktif' : 'nonaktif';
+        const targetCap = Number(veh.passenger_capacity || vt.default_capacity || 7);
+        if (
+          vt.category !== 'Internal' ||
+          vt.code !== veh.vehicle_code ||
+          vt.name !== veh.vehicle_name ||
+          vt.default_capacity !== targetCap ||
+          vt.active_status !== targetStatus
+        ) {
+          vt.category = 'Internal';
+          vt.code = veh.vehicle_code;
+          vt.name = veh.vehicle_name;
+          vt.default_capacity = targetCap;
+          vt.active_status = targetStatus;
+          if (!vt.required_sim) vt.required_sim = inferSim(targetCap);
+          changed = true;
+        }
+        if (veh.vehicle_type_id !== vt.vehicle_type_id) {
+          veh.vehicle_type_id = vt.vehicle_type_id;
+          changed = true;
+        }
+      } else {
+        const prevTypeId = veh.vehicle_type_id;
+        const newTypeId = `vtype-${veh.vehicle_id}`;
+        const cap = Number(veh.passenger_capacity || 7);
+        const newType: VehicleType = {
+          vehicle_type_id: newTypeId,
+          code: veh.vehicle_code,
+          name: veh.vehicle_name,
+          category: 'Internal',
+          default_capacity: cap,
+          required_sim: inferSim(cap),
+          description: `${veh.plate_number} · ${veh.asset_notes || veh.condition_notes || 'Kendaraan operasional milik sekolah.'}`,
+          active_status: veh.admin_status === 'aktif' ? 'aktif' : 'nonaktif',
+        };
+        snapshot.VEHICLE_TYPES.push(newType);
+        claimedTypeIds.add(newTypeId);
+        veh.vehicle_type_id = newTypeId;
+        changed = true;
+
+        if (prevTypeId) {
+          for (const drv of snapshot.DRIVERS) {
+            if (
+              drv.eligible_vehicle_type_ids.includes(prevTypeId) &&
+              !drv.eligible_vehicle_type_ids.includes(newTypeId)
+            ) {
+              drv.eligible_vehicle_type_ids.push(newTypeId);
+            }
+          }
+        }
+      }
+    }
+
+    // Drop any leftover unclaimed legacy generic Internal types & sync any custom unlinked Internal types to VEHICLES
+    const remainingVehicleTypes: VehicleType[] = [];
+    for (const vt of snapshot.VEHICLE_TYPES) {
+      if (vt.category === 'Eksternal' || claimedTypeIds.has(vt.vehicle_type_id)) {
+        remainingVehicleTypes.push(vt);
+        continue;
+      }
+      if (legacyGenericIds.has(vt.vehicle_type_id)) {
+        // Legacy generic type not claimed by any vehicle -> drop & clean driver refs
+        for (const drv of snapshot.DRIVERS) {
+          drv.eligible_vehicle_type_ids = drv.eligible_vehicle_type_ids.filter(
+            (id) => id !== vt.vehicle_type_id
+          );
+        }
+        changed = true;
+        continue;
+      }
+      // Custom Internal type created without a corresponding Vehicle -> create matching Vehicle so both menus stay identical
+      const now = nowWibIso();
+      const newVehicle: Vehicle = {
+        vehicle_id: `veh-from-${vt.vehicle_type_id}`,
+        vehicle_code: vt.code,
+        vehicle_name: vt.name,
+        plate_number: vt.code,
+        brand: '',
+        model: '',
+        vehicle_type_id: vt.vehicle_type_id,
+        manufacture_year: new Date().getFullYear(),
+        registration_year: new Date().getFullYear(),
+        color: '',
+        chassis_number: '',
+        engine_number: '',
+        fuel_type: 'Bensin',
+        transmission: 'Otomatis',
+        engine_capacity_cc: 1500,
+        passenger_capacity: Number(vt.default_capacity || 7),
+        photo_url: '/src/assets/images/fleet_innova_mpv_1794808757672.jpg',
+        managing_department_id: snapshot.DEPARTMENTS[0]?.department_id || '',
+        parking_location: 'Kampus Lazuardi',
+        ownership_status: 'Milik Sekolah',
+        purchase_date: '',
+        purchase_price: 0,
+        school_asset_number: '',
+        asset_notes: vt.description || '',
+        stnk_number: '',
+        stnk_expiry: '',
+        tax_due_date: '',
+        kir_expiry: '',
+        insurance_policy_number: '',
+        insurance_expiry: '',
+        drive_document_ref: '',
+        last_odometer: 0,
+        last_service_date: '',
+        last_service_odometer: 0,
+        next_service_date: '',
+        service_interval_km: 10000,
+        service_interval_months: 6,
+        primary_driver_id: '',
+        condition_notes: vt.description || '',
+        admin_status: vt.active_status === 'aktif' ? 'aktif' : 'tidak_aktif',
+        eligibility_status: 'layak',
+        usage_status: 'tersedia',
+        safety_blocked: false,
+        safety_block_reason: '',
+        updated_at: now,
+      };
+      snapshot.VEHICLES.push(newVehicle);
+      claimedTypeIds.add(vt.vehicle_type_id);
+      remainingVehicleTypes.push(vt);
+      changed = true;
+    }
+
+    if (remainingVehicleTypes.length !== snapshot.VEHICLE_TYPES.length) {
+      snapshot.VEHICLE_TYPES = remainingVehicleTypes;
+    }
+
     return changed;
   }
 
@@ -1949,7 +2116,7 @@ export class LvbmsDataStore {
         await this.ensureGoogleSheetsInitialized(target.sheets, target.spreadsheetId);
         const result = await this.readFromGoogleSheets(target.sheets, target.spreadsheetId);
         if (this.normalizeVehicleTypes(result)) {
-          await this.writeKeysToStorage(result, ['VEHICLE_TYPES'], strictRemote);
+          await this.writeKeysToStorage(result, ['VEHICLE_TYPES', 'VEHICLES', 'DRIVERS'], strictRemote);
         }
         if (target.mode === 'oauth') {
           this.writeLocalMirror(result);

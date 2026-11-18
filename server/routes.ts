@@ -522,70 +522,168 @@ apiRouter.get('/vehicle-types', requireAuth, async (req: AuthedRequest, res: Res
 
 apiRouter.post('/vehicle-types', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
   try {
-    const created = await dbStore.mutate(['VEHICLE_TYPES', 'AUDIT_LOGS'], (db) => {
-      const code = String(req.body.code || '').trim().toUpperCase();
-      const name = String(req.body.name || '').trim();
-      if (!code || !name) {
-        throw new Error('Kode dan nama jenis kendaraan wajib diisi.');
-      }
-      if (db.VEHICLE_TYPES.some((t) => t.code.toUpperCase() === code)) {
-        throw new Error(`Kode jenis kendaraan "${code}" sudah terdaftar.`);
-      }
-      const item = {
-        vehicle_type_id: crypto.randomUUID(),
-        code,
-        name,
-        category: req.body.category === 'Eksternal' ? ('Eksternal' as const) : ('Internal' as const),
-        default_capacity: Number(req.body.default_capacity || 7),
-        required_sim: String(req.body.required_sim || 'SIM A'),
-        description: String(req.body.description || ''),
-        active_status: req.body.active_status === 'nonaktif' ? ('nonaktif' as const) : ('aktif' as const),
-      };
-      db.VEHICLE_TYPES.push(item);
-      appendAuditLog(db, req.sessionUser!, 'CREATE', 'VEHICLE_TYPES', item.vehicle_type_id, `Tambah jenis kendaraan ${item.name} (${item.category})`);
-      return item;
-    });
+    const created = await dbStore.mutate(
+      ['VEHICLE_TYPES', 'VEHICLES', 'VEHICLE_HISTORY', 'AUDIT_LOGS'],
+      (db) => {
+        const code = String(req.body.code || '').trim().toUpperCase();
+        const name = String(req.body.name || '').trim();
+        if (!code || !name) {
+          throw new Error('Kode dan nama jenis kendaraan wajib diisi.');
+        }
+        if (db.VEHICLE_TYPES.some((t) => t.code.toUpperCase() === code)) {
+          throw new Error(`Kode jenis kendaraan "${code}" sudah terdaftar.`);
+        }
+        const category = req.body.category === 'Eksternal' ? ('Eksternal' as const) : ('Internal' as const);
+        const defaultCapacity = Number(req.body.default_capacity || 7);
+        const activeStatus = req.body.active_status === 'nonaktif' ? ('nonaktif' as const) : ('aktif' as const);
+        const description = String(req.body.description || '');
+        const item = {
+          vehicle_type_id: crypto.randomUUID(),
+          code,
+          name,
+          category,
+          default_capacity: defaultCapacity,
+          required_sim: String(req.body.required_sim || 'SIM A'),
+          description,
+          active_status: activeStatus,
+        };
+        db.VEHICLE_TYPES.push(item);
+
+        // Two-way sync: Internal school vehicle type also registers a matching vehicle in TMS VEHICLES
+        if (category === 'Internal') {
+          const now = new Date().toISOString();
+          const plateNumber = String(req.body.plate_number || code).trim().toUpperCase();
+          const v: Vehicle = {
+            vehicle_id: crypto.randomUUID(),
+            vehicle_code: code,
+            vehicle_name: name,
+            plate_number: plateNumber,
+            brand: String(req.body.brand || ''),
+            model: String(req.body.model || ''),
+            vehicle_type_id: item.vehicle_type_id,
+            manufacture_year: new Date().getFullYear(),
+            registration_year: new Date().getFullYear(),
+            color: '',
+            chassis_number: '',
+            engine_number: '',
+            fuel_type: 'Bensin',
+            transmission: 'Otomatis',
+            engine_capacity_cc: 1500,
+            passenger_capacity: defaultCapacity,
+            photo_url: '/src/assets/images/fleet_innova_mpv_1794808757672.jpg',
+            managing_department_id: db.DEPARTMENTS[0]?.department_id || '',
+            parking_location: 'Kampus Lazuardi Cinere',
+            ownership_status: 'Milik Sekolah',
+            purchase_date: '',
+            purchase_price: 0,
+            school_asset_number: '',
+            asset_notes: description,
+            stnk_number: '',
+            stnk_expiry: '',
+            tax_due_date: '',
+            kir_expiry: '',
+            insurance_policy_number: '',
+            insurance_expiry: '',
+            drive_document_ref: '',
+            last_odometer: 0,
+            last_service_date: '',
+            last_service_odometer: 0,
+            next_service_date: '',
+            service_interval_km: 10000,
+            service_interval_months: 6,
+            primary_driver_id: '',
+            condition_notes: description,
+            admin_status: activeStatus === 'aktif' ? 'aktif' : 'tidak_aktif',
+            eligibility_status: 'belum_diverifikasi',
+            usage_status: 'tersedia',
+            safety_blocked: false,
+            safety_block_reason: '',
+            updated_at: now,
+          };
+          db.VEHICLES.push(v);
+          appendVehicleHistory(db, {
+            vehicle_id: v.vehicle_id,
+            activity_type: 'Pendaftaran',
+            actor: req.sessionUser!,
+            summary: `Pendaftaran kendaraan sekolah via Master Jenis Kendaraan: ${v.vehicle_name} (${v.vehicle_code})`,
+            reference_id: v.vehicle_id,
+          });
+        }
+
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'CREATE',
+          'VEHICLE_TYPES',
+          item.vehicle_type_id,
+          `Tambah jenis kendaraan ${item.name} (${item.category})`
+        );
+        return item;
+      },
+      { requireRemoteSync: true }
+    );
     res.status(201).json({ vehicleType: created });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal menambah jenis kendaraan.' });
+    sendMutationError(res, err, 'Gagal menambah jenis kendaraan.');
   }
 });
 
 apiRouter.put('/vehicle-types/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
   try {
-    const updated = await dbStore.mutate(['VEHICLE_TYPES', 'AUDIT_LOGS'], (db) => {
-      const idx = db.VEHICLE_TYPES.findIndex((t) => t.vehicle_type_id === req.params.id);
-      if (idx === -1) return null;
-      const nextCode = req.body.code !== undefined ? String(req.body.code).trim().toUpperCase() : db.VEHICLE_TYPES[idx].code;
-      if (
-        nextCode &&
-        db.VEHICLE_TYPES.some((t) => t.vehicle_type_id !== req.params.id && t.code.toUpperCase() === nextCode)
-      ) {
-        throw new Error(`Kode jenis kendaraan "${nextCode}" sudah digunakan.`);
-      }
-      db.VEHICLE_TYPES[idx] = {
-        ...db.VEHICLE_TYPES[idx],
-        ...req.body,
-        code: nextCode,
-        vehicle_type_id: req.params.id,
-      };
-      appendAuditLog(
-        db,
-        req.sessionUser!,
-        'UPDATE',
-        'VEHICLE_TYPES',
-        req.params.id,
-        `Perbarui jenis kendaraan ${db.VEHICLE_TYPES[idx].name}`
-      );
-      return db.VEHICLE_TYPES[idx];
-    });
+    const updated = await dbStore.mutate(
+      ['VEHICLE_TYPES', 'VEHICLES', 'AUDIT_LOGS'],
+      (db) => {
+        const idx = db.VEHICLE_TYPES.findIndex((t) => t.vehicle_type_id === req.params.id);
+        if (idx === -1) return null;
+        const nextCode =
+          req.body.code !== undefined
+            ? String(req.body.code).trim().toUpperCase()
+            : db.VEHICLE_TYPES[idx].code;
+        if (
+          nextCode &&
+          db.VEHICLE_TYPES.some((t) => t.vehicle_type_id !== req.params.id && t.code.toUpperCase() === nextCode)
+        ) {
+          throw new Error(`Kode jenis kendaraan "${nextCode}" sudah digunakan.`);
+        }
+        const nextItem = {
+          ...db.VEHICLE_TYPES[idx],
+          ...req.body,
+          code: nextCode,
+          vehicle_type_id: req.params.id,
+        };
+        db.VEHICLE_TYPES[idx] = nextItem;
+
+        // Two-way sync with matching Vehicle in TMS
+        if (nextItem.category !== 'Eksternal') {
+          const linkedVeh = db.VEHICLES.find((v) => v.vehicle_type_id === req.params.id);
+          if (linkedVeh) {
+            linkedVeh.vehicle_code = nextItem.code;
+            linkedVeh.vehicle_name = nextItem.name;
+            linkedVeh.passenger_capacity = Number(nextItem.default_capacity || linkedVeh.passenger_capacity || 7);
+            linkedVeh.admin_status = nextItem.active_status === 'aktif' ? 'aktif' : 'tidak_aktif';
+            linkedVeh.updated_at = new Date().toISOString();
+          }
+        }
+
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'UPDATE',
+          'VEHICLE_TYPES',
+          req.params.id,
+          `Perbarui jenis kendaraan ${nextItem.name}`
+        );
+        return nextItem;
+      },
+      { requireRemoteSync: true }
+    );
     if (!updated) {
       res.status(404).json({ error: 'Jenis kendaraan tidak ditemukan.' });
       return;
     }
     res.json({ vehicleType: updated });
   } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal memperbarui jenis kendaraan.' });
+    sendMutationError(res, err, 'Gagal memperbarui jenis kendaraan.');
   }
 });
 
@@ -593,16 +691,29 @@ apiRouter.delete('/vehicle-types/:id', requireAuth, requireRole('ADMIN'), async 
   try {
     const force = req.query.force === 'true';
     const result = await dbStore.mutate(
-      ['VEHICLE_TYPES', 'AUDIT_LOGS'],
+      ['VEHICLE_TYPES', 'VEHICLES', 'DRIVERS', 'AUDIT_LOGS'],
       (db) => {
         const vt = db.VEHICLE_TYPES.find((t) => t.vehicle_type_id === req.params.id);
         if (!vt) return null;
+        const linkedVehicle = db.VEHICLES.find((v) => v.vehicle_type_id === req.params.id);
         const hasHistory =
-          db.VEHICLES.some((v) => v.vehicle_type_id === req.params.id) ||
-          db.BOOKINGS.some((b) => b.requested_vehicle_type_id === req.params.id) ||
-          db.DRIVERS.some((d) => d.eligible_vehicle_type_ids.includes(req.params.id));
+          db.BOOKINGS.some(
+            (b) =>
+              b.requested_vehicle_type_id === req.params.id ||
+              (linkedVehicle ? b.allocated_vehicle_ids.includes(linkedVehicle.vehicle_id) : false)
+          ) ||
+          (linkedVehicle
+            ? db.INSPECTIONS.some((i) => i.vehicle_id === linkedVehicle.vehicle_id) ||
+              db.REPAIRS.some((r) => r.vehicle_id === linkedVehicle.vehicle_id) ||
+              db.EXPENSES.some((e) => e.vehicle_id === linkedVehicle.vehicle_id)
+            : false);
+
         if (hasHistory && !force) {
           vt.active_status = 'nonaktif';
+          if (linkedVehicle) {
+            linkedVehicle.admin_status = 'tidak_aktif';
+            linkedVehicle.updated_at = new Date().toISOString();
+          }
           appendAuditLog(
             db,
             req.sessionUser!,
@@ -613,7 +724,16 @@ apiRouter.delete('/vehicle-types/:id', requireAuth, requireRole('ADMIN'), async 
           );
           return { softDeleted: true, hasHistory: true, vehicleType: vt };
         }
+
         db.VEHICLE_TYPES = db.VEHICLE_TYPES.filter((t) => t.vehicle_type_id !== req.params.id);
+        if (vt.category !== 'Eksternal' && linkedVehicle) {
+          db.VEHICLES = db.VEHICLES.filter((v) => v.vehicle_id !== linkedVehicle.vehicle_id);
+        }
+        for (const drv of db.DRIVERS) {
+          drv.eligible_vehicle_type_ids = drv.eligible_vehicle_type_ids.filter(
+            (id) => id !== req.params.id
+          );
+        }
         appendAuditLog(
           db,
           req.sessionUser!,
@@ -692,96 +812,193 @@ apiRouter.get('/vehicles/:id/detail', requireAuth, requireRole('ADMIN'), async (
 });
 
 apiRouter.post('/vehicles', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  const now = new Date().toISOString();
-  const created = await dbStore.mutate(['VEHICLES', 'VEHICLE_HISTORY', 'AUDIT_LOGS'], (db) => {
-    const v: Vehicle = {
-      vehicle_id: crypto.randomUUID(),
-      vehicle_code: req.body.vehicle_code || `LZ-OPR-${String(db.VEHICLES.length + 1).padStart(2, '0')}`,
-      vehicle_name: String(req.body.vehicle_name || ''),
-      plate_number: String(req.body.plate_number || '').toUpperCase(),
-      brand: String(req.body.brand || ''),
-      model: String(req.body.model || ''),
-      vehicle_type_id: String(req.body.vehicle_type_id || ''),
-      manufacture_year: Number(req.body.manufacture_year || new Date().getFullYear()),
-      registration_year: Number(req.body.registration_year || new Date().getFullYear()),
-      color: String(req.body.color || ''),
-      chassis_number: String(req.body.chassis_number || ''),
-      engine_number: String(req.body.engine_number || ''),
-      fuel_type: req.body.fuel_type || 'Bensin',
-      transmission: req.body.transmission || 'Otomatis',
-      engine_capacity_cc: Number(req.body.engine_capacity_cc || 1500),
-      passenger_capacity: Number(req.body.passenger_capacity || 7),
-      photo_url: String(req.body.photo_url || '/src/assets/images/fleet_innova_mpv_1794808757672.jpg'),
-      managing_department_id: String(req.body.managing_department_id || ''),
-      parking_location: String(req.body.parking_location || ''),
-      ownership_status: req.body.ownership_status || 'Milik Sekolah',
-      purchase_date: String(req.body.purchase_date || ''),
-      purchase_price: Number(req.body.purchase_price || 0),
-      school_asset_number: String(req.body.school_asset_number || ''),
-      asset_notes: String(req.body.asset_notes || ''),
-      stnk_number: String(req.body.stnk_number || ''),
-      stnk_expiry: String(req.body.stnk_expiry || ''),
-      tax_due_date: String(req.body.tax_due_date || ''),
-      kir_expiry: String(req.body.kir_expiry || ''),
-      insurance_policy_number: String(req.body.insurance_policy_number || ''),
-      insurance_expiry: String(req.body.insurance_expiry || ''),
-      drive_document_ref: String(req.body.drive_document_ref || ''),
-      last_odometer: Number(req.body.last_odometer || 0),
-      last_service_date: String(req.body.last_service_date || ''),
-      last_service_odometer: Number(req.body.last_service_odometer || 0),
-      next_service_date: String(req.body.next_service_date || ''),
-      service_interval_km: Number(req.body.service_interval_km || 10000),
-      service_interval_months: Number(req.body.service_interval_months || 6),
-      primary_driver_id: String(req.body.primary_driver_id || ''),
-      condition_notes: String(req.body.condition_notes || ''),
-      admin_status: req.body.admin_status || 'aktif',
-      eligibility_status: req.body.eligibility_status || 'belum_diverifikasi',
-      usage_status: 'tersedia',
-      safety_blocked: Boolean(req.body.safety_blocked),
-      safety_block_reason: String(req.body.safety_block_reason || ''),
-      updated_at: now,
-    };
-    db.VEHICLES.push(v);
-    appendVehicleHistory(db, {
-      vehicle_id: v.vehicle_id,
-      activity_type: 'Pendaftaran',
-      actor: req.sessionUser!,
-      summary: `Pendaftaran kendaraan baru: ${v.vehicle_name} (${v.plate_number})`,
-      reference_id: v.vehicle_id,
-    });
-    appendAuditLog(db, req.sessionUser!, 'CREATE', 'VEHICLES', v.vehicle_id, `Tambah kendaraan ${v.plate_number}`);
-    return v;
-  });
-  res.status(201).json({ vehicle: created });
+  try {
+    const now = new Date().toISOString();
+    const created = await dbStore.mutate(
+      ['VEHICLES', 'VEHICLE_TYPES', 'VEHICLE_HISTORY', 'AUDIT_LOGS'],
+      (db) => {
+        const vehicleCode = String(
+          req.body.vehicle_code || `LZ-OPR-${String(db.VEHICLES.length + 1).padStart(2, '0')}`
+        )
+          .trim()
+          .toUpperCase();
+        const vehicleName = String(req.body.vehicle_name || '').trim();
+        const plateNumber = String(req.body.plate_number || '').trim().toUpperCase();
+        const passengerCapacity = Number(req.body.passenger_capacity || 7);
+        const adminStatus = req.body.admin_status === 'tidak_aktif' ? 'tidak_aktif' : 'aktif';
+        const requiredSim = String(
+          req.body.required_sim ||
+            (passengerCapacity >= 25 ? 'SIM B1 Umum' : passengerCapacity >= 10 ? 'SIM A Umum' : 'SIM A')
+        );
+
+        // Two-way sync: always pair the school vehicle 1-to-1 with a dedicated Internal VehicleType
+        const requestedTypeId = String(req.body.vehicle_type_id || '').trim();
+        const existingUnclaimedType = requestedTypeId
+          ? db.VEHICLE_TYPES.find(
+              (t) =>
+                t.vehicle_type_id === requestedTypeId &&
+                t.category !== 'Eksternal' &&
+                !db.VEHICLES.some((v) => v.vehicle_type_id === t.vehicle_type_id)
+            )
+          : undefined;
+
+        let syncedTypeId: string;
+        if (existingUnclaimedType) {
+          existingUnclaimedType.code = vehicleCode;
+          existingUnclaimedType.name = vehicleName;
+          existingUnclaimedType.default_capacity = passengerCapacity;
+          existingUnclaimedType.required_sim = requiredSim;
+          existingUnclaimedType.active_status = adminStatus === 'aktif' ? 'aktif' : 'nonaktif';
+          syncedTypeId = existingUnclaimedType.vehicle_type_id;
+        } else {
+          if (db.VEHICLE_TYPES.some((t) => t.code.trim().toUpperCase() === vehicleCode)) {
+            throw new Error(`Kode kendaraan "${vehicleCode}" sudah terdaftar.`);
+          }
+          const newVt = {
+            vehicle_type_id: crypto.randomUUID(),
+            code: vehicleCode,
+            name: vehicleName,
+            category: 'Internal' as const,
+            default_capacity: passengerCapacity,
+            required_sim: requiredSim,
+            description: `${plateNumber} · ${String(req.body.asset_notes || req.body.condition_notes || 'Kendaraan operasional milik sekolah.')}`,
+            active_status: adminStatus === 'aktif' ? ('aktif' as const) : ('nonaktif' as const),
+          };
+          db.VEHICLE_TYPES.push(newVt);
+          syncedTypeId = newVt.vehicle_type_id;
+        }
+
+        const v: Vehicle = {
+          vehicle_id: crypto.randomUUID(),
+          vehicle_code: vehicleCode,
+          vehicle_name: vehicleName,
+          plate_number: plateNumber,
+          brand: String(req.body.brand || ''),
+          model: String(req.body.model || ''),
+          vehicle_type_id: syncedTypeId,
+          manufacture_year: Number(req.body.manufacture_year || new Date().getFullYear()),
+          registration_year: Number(req.body.registration_year || new Date().getFullYear()),
+          color: String(req.body.color || ''),
+          chassis_number: String(req.body.chassis_number || ''),
+          engine_number: String(req.body.engine_number || ''),
+          fuel_type: req.body.fuel_type || 'Bensin',
+          transmission: req.body.transmission || 'Otomatis',
+          engine_capacity_cc: Number(req.body.engine_capacity_cc || 1500),
+          passenger_capacity: passengerCapacity,
+          photo_url: String(req.body.photo_url || '/src/assets/images/fleet_innova_mpv_1794808757672.jpg'),
+          managing_department_id: String(req.body.managing_department_id || ''),
+          parking_location: String(req.body.parking_location || ''),
+          ownership_status: req.body.ownership_status || 'Milik Sekolah',
+          purchase_date: String(req.body.purchase_date || ''),
+          purchase_price: Number(req.body.purchase_price || 0),
+          school_asset_number: String(req.body.school_asset_number || ''),
+          asset_notes: String(req.body.asset_notes || ''),
+          stnk_number: String(req.body.stnk_number || ''),
+          stnk_expiry: String(req.body.stnk_expiry || ''),
+          tax_due_date: String(req.body.tax_due_date || ''),
+          kir_expiry: String(req.body.kir_expiry || ''),
+          insurance_policy_number: String(req.body.insurance_policy_number || ''),
+          insurance_expiry: String(req.body.insurance_expiry || ''),
+          drive_document_ref: String(req.body.drive_document_ref || ''),
+          last_odometer: Number(req.body.last_odometer || 0),
+          last_service_date: String(req.body.last_service_date || ''),
+          last_service_odometer: Number(req.body.last_service_odometer || 0),
+          next_service_date: String(req.body.next_service_date || ''),
+          service_interval_km: Number(req.body.service_interval_km || 10000),
+          service_interval_months: Number(req.body.service_interval_months || 6),
+          primary_driver_id: String(req.body.primary_driver_id || ''),
+          condition_notes: String(req.body.condition_notes || ''),
+          admin_status: adminStatus,
+          eligibility_status: req.body.eligibility_status || 'belum_diverifikasi',
+          usage_status: 'tersedia',
+          safety_blocked: Boolean(req.body.safety_blocked),
+          safety_block_reason: String(req.body.safety_block_reason || ''),
+          updated_at: now,
+        };
+        db.VEHICLES.push(v);
+        appendVehicleHistory(db, {
+          vehicle_id: v.vehicle_id,
+          activity_type: 'Pendaftaran',
+          actor: req.sessionUser!,
+          summary: `Pendaftaran kendaraan baru: ${v.vehicle_name} (${v.plate_number})`,
+          reference_id: v.vehicle_id,
+        });
+        appendAuditLog(db, req.sessionUser!, 'CREATE', 'VEHICLES', v.vehicle_id, `Tambah kendaraan ${v.plate_number}`);
+        return v;
+      },
+      { requireRemoteSync: true }
+    );
+    res.status(201).json({ vehicle: created });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal menambah kendaraan.');
+  }
 });
 
 apiRouter.put('/vehicles/:id', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
-  const updated = await dbStore.mutate(['VEHICLES', 'VEHICLE_HISTORY', 'AUDIT_LOGS'], (db) => {
-    const idx = db.VEHICLES.findIndex((v) => v.vehicle_id === req.params.id);
-    if (idx === -1) return null;
-    const prev = db.VEHICLES[idx];
-    const next: Vehicle = {
-      ...prev,
-      ...req.body,
-      vehicle_id: req.params.id,
-      updated_at: new Date().toISOString(),
-    };
-    db.VEHICLES[idx] = next;
-    appendVehicleHistory(db, {
-      vehicle_id: next.vehicle_id,
-      activity_type: prev.eligibility_status !== next.eligibility_status ? 'Kelayakan' : 'Master Data',
-      actor: req.sessionUser!,
-      summary: `Pembaruan data kendaraan ${next.plate_number}${prev.eligibility_status !== next.eligibility_status ? ` (Kelayakan: ${next.eligibility_status})` : ''}`,
-      reference_id: next.vehicle_id,
-    });
-    appendAuditLog(db, req.sessionUser!, 'UPDATE', 'VEHICLES', next.vehicle_id, `Update kendaraan ${next.plate_number}`);
-    return next;
-  });
-  if (!updated) {
-    res.status(404).json({ error: 'Kendaraan tidak ditemukan.' });
-    return;
+  try {
+    const updated = await dbStore.mutate(
+      ['VEHICLES', 'VEHICLE_TYPES', 'VEHICLE_HISTORY', 'AUDIT_LOGS'],
+      (db) => {
+        const idx = db.VEHICLES.findIndex((v) => v.vehicle_id === req.params.id);
+        if (idx === -1) return null;
+        const prev = db.VEHICLES[idx];
+        const { required_sim: reqSimBody, ...vehPatch } = req.body as Record<string, unknown>;
+        const next: Vehicle = {
+          ...prev,
+          ...vehPatch,
+          vehicle_id: req.params.id,
+          vehicle_code: String(vehPatch.vehicle_code ?? prev.vehicle_code).trim().toUpperCase(),
+          updated_at: new Date().toISOString(),
+        };
+        db.VEHICLES[idx] = next;
+
+        // Sync corresponding Internal VehicleType
+        const vt = db.VEHICLE_TYPES.find((t) => t.vehicle_type_id === next.vehicle_type_id);
+        if (vt && vt.category !== 'Eksternal') {
+          vt.code = next.vehicle_code;
+          vt.name = next.vehicle_name;
+          vt.default_capacity = Number(next.passenger_capacity || vt.default_capacity || 7);
+          vt.active_status = next.admin_status === 'aktif' ? 'aktif' : 'nonaktif';
+          if (typeof reqSimBody === 'string' && reqSimBody.trim()) {
+            vt.required_sim = reqSimBody.trim();
+          }
+          vt.description = `${next.plate_number} · ${next.asset_notes || next.condition_notes || 'Kendaraan operasional milik sekolah.'}`;
+        } else {
+          const newVt = {
+            vehicle_type_id: crypto.randomUUID(),
+            code: next.vehicle_code,
+            name: next.vehicle_name,
+            category: 'Internal' as const,
+            default_capacity: Number(next.passenger_capacity || 7),
+            required_sim: typeof reqSimBody === 'string' && reqSimBody.trim() ? reqSimBody.trim() : 'SIM A',
+            description: `${next.plate_number} · ${next.asset_notes || next.condition_notes || 'Kendaraan operasional milik sekolah.'}`,
+            active_status: next.admin_status === 'aktif' ? ('aktif' as const) : ('nonaktif' as const),
+          };
+          db.VEHICLE_TYPES.push(newVt);
+          next.vehicle_type_id = newVt.vehicle_type_id;
+          db.VEHICLES[idx] = next;
+        }
+
+        appendVehicleHistory(db, {
+          vehicle_id: next.vehicle_id,
+          activity_type: prev.eligibility_status !== next.eligibility_status ? 'Kelayakan' : 'Master Data',
+          actor: req.sessionUser!,
+          summary: `Pembaruan data kendaraan ${next.plate_number}${prev.eligibility_status !== next.eligibility_status ? ` (Kelayakan: ${next.eligibility_status})` : ''}`,
+          reference_id: next.vehicle_id,
+        });
+        appendAuditLog(db, req.sessionUser!, 'UPDATE', 'VEHICLES', next.vehicle_id, `Update kendaraan ${next.plate_number}`);
+        return next;
+      },
+      { requireRemoteSync: true }
+    );
+    if (!updated) {
+      res.status(404).json({ error: 'Kendaraan tidak ditemukan.' });
+      return;
+    }
+    res.json({ vehicle: updated });
+  } catch (err) {
+    sendMutationError(res, err, 'Gagal memperbarui kendaraan.');
   }
-  res.json({ vehicle: updated });
 });
 
 apiRouter.post('/vehicles/:id/verify-eligibility', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
@@ -843,7 +1060,7 @@ apiRouter.delete('/vehicles/:id', requireAuth, requireRole('ADMIN'), async (req:
   try {
     const force = req.query.force === 'true';
     const result = await dbStore.mutate(
-      ['VEHICLES', 'AUDIT_LOGS'],
+      ['VEHICLES', 'VEHICLE_TYPES', 'DRIVERS', 'AUDIT_LOGS'],
       (db) => {
         const vehicle = db.VEHICLES.find((v) => v.vehicle_id === req.params.id);
         if (!vehicle) return null;
@@ -852,9 +1069,14 @@ apiRouter.delete('/vehicles/:id', requireAuth, requireRole('ADMIN'), async (req:
           db.INSPECTIONS.some((i) => i.vehicle_id === vehicle.vehicle_id) ||
           db.REPAIRS.some((r) => r.vehicle_id === vehicle.vehicle_id) ||
           db.EXPENSES.some((e) => e.vehicle_id === vehicle.vehicle_id);
+        const linkedType = db.VEHICLE_TYPES.find((t) => t.vehicle_type_id === vehicle.vehicle_type_id);
+
         if (hasHistory && !force) {
           vehicle.admin_status = 'tidak_aktif';
           vehicle.updated_at = new Date().toISOString();
+          if (linkedType && linkedType.category !== 'Eksternal') {
+            linkedType.active_status = 'nonaktif';
+          }
           appendAuditLog(
             db,
             req.sessionUser!,
@@ -865,7 +1087,23 @@ apiRouter.delete('/vehicles/:id', requireAuth, requireRole('ADMIN'), async (req:
           );
           return { softDeleted: true, hasHistory: true, vehicle };
         }
+
         db.VEHICLES = db.VEHICLES.filter((v) => v.vehicle_id !== req.params.id);
+        if (linkedType && linkedType.category !== 'Eksternal') {
+          const stillUsedByOtherVehicle = db.VEHICLES.some(
+            (v) => v.vehicle_type_id === linkedType.vehicle_type_id
+          );
+          if (!stillUsedByOtherVehicle) {
+            db.VEHICLE_TYPES = db.VEHICLE_TYPES.filter(
+              (t) => t.vehicle_type_id !== linkedType.vehicle_type_id
+            );
+            for (const drv of db.DRIVERS) {
+              drv.eligible_vehicle_type_ids = drv.eligible_vehicle_type_ids.filter(
+                (id) => id !== linkedType.vehicle_type_id
+              );
+            }
+          }
+        }
         appendAuditLog(
           db,
           req.sessionUser!,

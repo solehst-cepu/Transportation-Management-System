@@ -874,11 +874,12 @@ export function VehicleTypesPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VehicleType | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [form, setForm] = useState<Partial<VehicleType>>({
+  const [form, setForm] = useState<Partial<VehicleType> & { plate_number?: string }>({
     category: 'Internal',
     active_status: 'aktif',
     required_sim: 'SIM A',
     default_capacity: 7,
+    plate_number: '',
   });
 
   const load = useCallback(async () => {
@@ -896,13 +897,17 @@ export function VehicleTypesPage() {
   const openCreate = (category: 'Internal' | 'Eksternal') => {
     setEditId(null);
     setForm({
-      code: category === 'Eksternal' ? 'SEWA-' : '',
+      code:
+        category === 'Eksternal'
+          ? 'SEWA-'
+          : `LZ-OPR-${String(operationalTypes.length + 1).padStart(2, '0')}`,
       name: '',
       category,
       default_capacity: category === 'Eksternal' ? 50 : 7,
       required_sim: category === 'Eksternal' ? 'SIM B2 Umum' : 'SIM A',
       description: '',
       active_status: 'aktif',
+      plate_number: '',
     });
     setModalOpen(true);
   };
@@ -912,6 +917,7 @@ export function VehicleTypesPage() {
     setForm({
       ...vt,
       category: vt.category === 'Eksternal' ? 'Eksternal' : 'Internal',
+      plate_number: '',
     });
     setModalOpen(true);
   };
@@ -1072,7 +1078,9 @@ export function VehicleTypesPage() {
                 Jenis Kendaraan Operasional Sekolah
               </CardTitle>
               <CardDescription>
-                Digunakan untuk master armada milik sekolah, pengajuan kendaraan dinas internal, dan kualifikasi SIM pengemudi.
+                Tersinkronisasi otomatis dua arah dengan modul{' '}
+                <strong>Transport Management → Data Kendaraan</strong> (unit armada milik sekolah), pengajuan
+                kendaraan dinas internal, dan kualifikasi SIM pengemudi.
               </CardDescription>
             </div>
             <Button size="sm" onClick={() => openCreate('Internal')}>
@@ -1117,13 +1125,19 @@ export function VehicleTypesPage() {
             </DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSave} className="space-y-3">
+            {form.category !== 'Eksternal' && (
+              <div className="rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900">
+                Unit operasional sekolah akan otomatis dibuat / diperbarui pada{' '}
+                <strong>Transport Management → Data Kendaraan</strong>.
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Kode</Label>
                 <Input
                   value={form.code || ''}
                   onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
-                  placeholder={form.category === 'Eksternal' ? 'SEWA-BBUS' : 'MPV'}
+                  placeholder={form.category === 'Eksternal' ? 'SEWA-BBUS' : 'LZ-OPR-04'}
                   required
                 />
               </div>
@@ -1131,6 +1145,7 @@ export function VehicleTypesPage() {
                 <Label>Kelompok Jenis</Label>
                 <Select
                   value={form.category === 'Eksternal' ? 'Eksternal' : 'Internal'}
+                  disabled={Boolean(editId)}
                   onChange={(e) => setForm({ ...form, category: e.target.value as 'Internal' | 'Eksternal' })}
                 >
                   <option value="Internal">Kendaraan Operasional Sekolah</option>
@@ -1143,10 +1158,24 @@ export function VehicleTypesPage() {
               <Input
                 value={form.name || ''}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder={form.category === 'Eksternal' ? 'Contoh: Big Bus / Medium Bus' : 'Contoh: MPV Operasional'}
+                placeholder={
+                  form.category === 'Eksternal'
+                    ? 'Contoh: Big Bus / Medium Bus'
+                    : 'Contoh: Toyota Innova Zenix 2.0 G'
+                }
                 required
               />
             </div>
+            {!editId && form.category !== 'Eksternal' && (
+              <div>
+                <Label>Nomor Polisi (Opsional)</Label>
+                <Input
+                  value={form.plate_number || ''}
+                  onChange={(e) => setForm({ ...form, plate_number: e.target.value.toUpperCase() })}
+                  placeholder="Contoh: B 1234 LZD (kosongkan jika menyusul)"
+                />
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Kapasitas Default (Kursi)</Label>

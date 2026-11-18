@@ -35,7 +35,7 @@ export function VehiclesPage() {
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<Partial<Vehicle>>({});
+  const [form, setForm] = useState<Partial<Vehicle> & { required_sim?: string }>({});
   const [deleteTarget, setDeleteTarget] = useState<Vehicle | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -69,7 +69,8 @@ export function VehiclesPage() {
       plate_number: '',
       brand: 'Toyota',
       model: '',
-      vehicle_type_id: vehicleTypes[0]?.vehicle_type_id || '',
+      vehicle_type_id: '',
+      required_sim: 'SIM A',
       manufacture_year: 2024,
       registration_year: 2024,
       color: 'Putih',
@@ -91,8 +92,12 @@ export function VehiclesPage() {
   };
 
   const openEdit = (v: Vehicle) => {
+    const linkedType = vehicleTypes.find((t) => t.vehicle_type_id === v.vehicle_type_id);
     setEditingId(v.vehicle_id);
-    setForm(v);
+    setForm({
+      ...v,
+      required_sim: linkedType?.required_sim || 'SIM A',
+    });
     setModalOpen(true);
   };
 
@@ -232,7 +237,12 @@ export function VehiclesPage() {
                         <div>
                           <div className="font-semibold text-slate-900">{v.vehicle_name}</div>
                           <div className="text-xs text-slate-500">
-                            {v.brand} {v.model} · {v.manufacture_year} · {v.passenger_capacity} kursi
+                            {v.brand ? `${v.brand} ${v.model} · ` : ''}
+                            {v.manufacture_year} · {v.passenger_capacity} kursi
+                            {(() => {
+                              const sim = vehicleTypes.find((t) => t.vehicle_type_id === v.vehicle_type_id)?.required_sim;
+                              return sim ? ` · ${sim}` : '';
+                            })()}
                           </div>
                         </div>
                       </div>
@@ -294,12 +304,16 @@ export function VehiclesPage() {
             <DialogTitle>{editingId ? 'Edit Master Kendaraan' : 'Tambah Kendaraan Operasional Sekolah'}</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSave} className="space-y-5">
+            <div className="rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-900">
+              Data kendaraan sekolah di menu ini tersinkronisasi otomatis 1-berbanding-1 dengan{' '}
+              <strong>Master Data → Jenis Kendaraan (Operasional Sekolah)</strong>.
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <Label>Kode Kendaraan</Label>
                 <Input
                   value={form.vehicle_code || ''}
-                  onChange={(e) => setForm({ ...form, vehicle_code: e.target.value })}
+                  onChange={(e) => setForm({ ...form, vehicle_code: e.target.value.toUpperCase() })}
                   required
                 />
               </div>
@@ -334,18 +348,16 @@ export function VehiclesPage() {
                 />
               </div>
               <div>
-                <Label>Jenis Kendaraan</Label>
+                <Label>Syarat SIM Pengemudi</Label>
                 <Select
-                  value={form.vehicle_type_id || ''}
-                  onChange={(e) => setForm({ ...form, vehicle_type_id: e.target.value })}
+                  value={form.required_sim || 'SIM A'}
+                  onChange={(e) => setForm({ ...form, required_sim: e.target.value })}
                 >
-                  {vehicleTypes
-                    .filter((vt) => vt.active_status === 'aktif' || vt.vehicle_type_id === form.vehicle_type_id)
-                    .map((vt) => (
-                      <option key={vt.vehicle_type_id} value={vt.vehicle_type_id}>
-                        {vt.name}
-                      </option>
-                    ))}
+                  {['SIM A', 'SIM A Umum', 'SIM B1', 'SIM B1 Umum', 'SIM B2', 'SIM B2 Umum'].map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
                 </Select>
               </div>
               <div>
