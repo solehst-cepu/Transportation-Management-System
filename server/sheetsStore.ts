@@ -829,12 +829,17 @@ function createInitialSeed(): DatabaseSnapshot {
         capacity: 50,
         unit_count: 2,
         vehicle_year: 2024,
+        unit_rental_price: 4800000,
+        toll_cost_per_unit: 150000,
+        parking_cost_per_unit: 50000,
+        portal_cost_per_unit: 25000,
+        lunch_cost_per_unit: 75000,
         rental_price: 9600000,
         extra_cost: 600000,
         total_cost: 10200000,
         facilities: 'AC, Reclining Seat, Sabuk Pengaman 50 titik, APAR, P3K, Mic',
         valid_until: daysFromNowIso(7),
-        notes: 'Sudah termasuk tol Cipularang dan parkir museum.',
+        notes: 'Sudah termasuk sewa 2 unit Big Bus + estimasi tol Cipularang, parkir, portal, dan makan siang kru.',
         verify_vehicle_docs: true,
         verify_kir: true,
         verify_vehicle_condition: true,
@@ -852,12 +857,17 @@ function createInitialSeed(): DatabaseSnapshot {
         capacity: 59,
         unit_count: 2,
         vehicle_year: 2022,
+        unit_rental_price: 4600000,
+        toll_cost_per_unit: 200000,
+        parking_cost_per_unit: 50000,
+        portal_cost_per_unit: 25000,
+        lunch_cost_per_unit: 100000,
         rental_price: 9200000,
         extra_cost: 750000,
         total_cost: 9950000,
         facilities: 'AC, TV LED, Dispenser, Charger USB',
         valid_until: daysFromNowIso(5),
-        notes: 'Belum termasuk tol dan tips pengemudi.',
+        notes: 'Rekomendasi unit ekonomis; tol, parkir, portal, dan makan siang kru ditanggung sekolah.',
         verify_vehicle_docs: true,
         verify_kir: true,
         verify_vehicle_condition: false,
@@ -1828,6 +1838,9 @@ export class LvbmsDataStore {
       b.companion_count = Number(b.companion_count || 0);
       b.external_unit_count = Number(b.external_unit_count || 0);
       b.estimated_budget = Number(b.estimated_budget || 0);
+      if (!b.external_budget_attachment || typeof b.external_budget_attachment !== 'object') {
+        delete b.external_budget_attachment;
+      }
     }
     for (const d of snapshot.DRIVERS) {
       d.eligible_vehicle_type_ids = this.ensureArrayField<string>(d.eligible_vehicle_type_ids);

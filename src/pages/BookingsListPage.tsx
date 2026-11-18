@@ -6,9 +6,13 @@ import {
   CheckCircle2,
   Download,
   Eye,
+  FileCheck2,
   FileEdit,
+  FileText,
+  PenTool,
   Plus,
   RefreshCw,
+  Save,
   Search,
   ShieldAlert,
   Trash2,
@@ -17,12 +21,19 @@ import {
 import { StorageDiagnostics, useAuth } from '../context/AuthContext.tsx';
 import { ApiError, apiRequest } from '../lib/api.ts';
 import { ConfirmDeleteDialog } from '../components/ConfirmDeleteDialog.tsx';
-import { EnrichedBookingForPdf, exportBookingSlipPdf } from '../lib/pdfExport.ts';
+import { SignaturePad } from '../components/SignaturePad.tsx';
+import {
+  EnrichedBookingForPdf,
+  exportBookingSlipPdf,
+  exportExternalBudgetAttachmentPdf,
+} from '../lib/pdfExport.ts';
 import { formatDateTimeWib, formatIdr } from '../lib/utils.ts';
 import {
   BookingStatus,
   Driver,
+  ExternalBudgetAttachment,
   Vehicle,
+  VehicleType,
   Vendor,
   VendorQuote,
 } from '../../shared/types.ts';
@@ -117,14 +128,18 @@ export function BookingsListPage({
   // External Vendor Quote Modal (Admin)
   const [quoteModalOpen, setQuoteModalOpen] = useState(false);
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [externalVehicleTypes, setExternalVehicleTypes] = useState<VehicleType[]>([]);
   const [quoteForm, setQuoteForm] = useState({
     vendor_id: '',
     vehicle_type: 'Big Bus',
     capacity: 50,
     unit_count: 1,
     vehicle_year: 2024,
-    rental_price: 4500000,
-    extra_cost: 0,
+    unit_rental_price: 4500000,
+    toll_cost_per_unit: 0,
+    parking_cost_per_unit: 0,
+    portal_cost_per_unit: 0,
+    lunch_cost_per_unit: 0,
     facilities: 'AC, Sabuk Pengaman Tiap Kursi, APAR, P3K',
     valid_until: '',
     notes: '',
@@ -135,6 +150,35 @@ export function BookingsListPage({
     verify_safety_equipment: true,
     verify_school_policy: true,
   });
+
+  // External Budget Attachment & Admin Authorization Signature Form
+  const [budgetForm, setBudgetForm] = useState<ExternalBudgetAttachment>({
+    selected_quote_id: '',
+    vendor_id: '',
+    vendor_name: '',
+    vehicle_choice: 'Big Bus',
+    vehicle_capacity: 50,
+    vehicle_year: 2024,
+    unit_count: 1,
+    rental_price_per_unit: 0,
+    toll_cost_per_unit: 0,
+    parking_cost_per_unit: 0,
+    portal_cost_per_unit: 0,
+    lunch_cost_per_unit: 0,
+    total_rental_cost: 0,
+    total_toll_cost: 0,
+    total_parking_cost: 0,
+    total_portal_cost: 0,
+    total_lunch_cost: 0,
+    grand_total_cost: 0,
+    admin_notes: '',
+    authorized_by_name: user?.name || '',
+    authorized_by_email: user?.email || '',
+    authorized_by_role: user?.adminRole || 'GA Admin',
+    authorized_at: '',
+    signature_data_url: '',
+  });
+  const [savingBudget, setSavingBudget] = useState(false);
 
   // User revision modal
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -190,14 +234,108 @@ export function BookingsListPage({
     void loadBookings();
   }, [loadBookings]);
 
+  const loadExternalReferences = useCallback(async () => {
+    if (!isAdmin) return { vendors: [] as Vendor[], externalTypes: [] as VehicleType[] };
+    try {
+      const [vRes, vtRes] = await Promise.all([
+        apiRequest<{ vendors: Vendor[] }>('/api/vendors'),
+        apiRequest<{ vehicleTypes: VehicleType[] }>('/api/vehicle-types'),
+      ]);
+      const activeVendors = vRes.vendors.filter((v) => v.active_status === 'aktif');
+      const activeExtTypes = vtRes.vehicleTypes.filter((t) => t.category === 'Eksternal' && t.active_status === 'aktif');
+      setVendors(activeVendors);
+      setExternalVehicleTypes(activeExtTypes);
+      return { vendors: activeVendors, externalTypes: activeExtTypes };
+    } catch {
+      return { vendors: [] as Vendor[], externalTypes: [] as VehicleType[] };
+    }
+  }, [isAdmin]);
+
+  const initBudgetFormFromBooking = useCallback(
+    (
+      booking: EnrichedBookingForPdf,
+      quoteList: (VendorQuote & { vendor_name?: string })[],
+      vendorList: Vendor[]
+    ) => {
+      const saved = booking.external_budget_attachment;
+      if (saved && saved.vehicle_choice) {
+        setBudgetForm({
+          ...saved,
+          authorized_by_name: saved.authorized_by_name || user?.name || '',
+          authorized_by_email: saved.authorized_by_email || user?.email || '',
+          authorized_by_role: saved.authorized_by_role || user?.adminRole || 'GA Admin',
+        });
+        return;
+      }
+
+      const preferredQuote =
+        quoteList.find((q) => q.is_selected || q.quote_id === booking.selected_quote_id) || quoteList[0];
+      const unitCount = Math.max(
+        1,
+        Number(preferredQuote?.unit_count || booking.external_unit_count || 1)
+      );
+      const rentalPerUnit = preferredQuote
+        ? Number(
+            preferredQuote.unit_rental_price ??
+              Math.round(Number(preferredQuote.rental_price || 0) / unitCount)
+          )
+        : Math.round(Number(booking.estimated_budget || 0) / unitCount);
+      const tollPerUnit = Number(preferredQuote?.toll_cost_per_unit || 0);
+      const parkingPerUnit = Number(preferredQuote?.parking_cost_per_unit || 0);
+      const portalPerUnit = Number(preferredQuote?.portal_cost_per_unit || 0);
+      const lunchPerUnit = Number(preferredQuote?.lunch_cost_per_unit || 0);
+      const vendorId = preferredQuote?.vendor_id || booking.selected_vendor_id || vendorList[0]?.vendor_id || '';
+      const vendorName =
+        preferredQuote?.vendor_name ||
+        booking.selected_vendor_name ||
+        vendorList.find((v) => v.vendor_id === vendorId)?.company_name ||
+        '';
+
+      setBudgetForm({
+        selected_quote_id: preferredQuote?.quote_id || booking.selected_quote_id || '',
+        vendor_id: vendorId,
+        vendor_name: vendorName,
+        vehicle_choice: preferredQuote?.vehicle_type || booking.external_vehicle_type || 'Big Bus',
+        vehicle_capacity: Number(preferredQuote?.capacity || 50),
+        vehicle_year: Number(preferredQuote?.vehicle_year || new Date().getFullYear()),
+        unit_count: unitCount,
+        rental_price_per_unit: rentalPerUnit,
+        toll_cost_per_unit: tollPerUnit,
+        parking_cost_per_unit: parkingPerUnit,
+        portal_cost_per_unit: portalPerUnit,
+        lunch_cost_per_unit: lunchPerUnit,
+        total_rental_cost: rentalPerUnit * unitCount,
+        total_toll_cost: tollPerUnit * unitCount,
+        total_parking_cost: parkingPerUnit * unitCount,
+        total_portal_cost: portalPerUnit * unitCount,
+        total_lunch_cost: lunchPerUnit * unitCount,
+        grand_total_cost:
+          (rentalPerUnit + tollPerUnit + parkingPerUnit + portalPerUnit + lunchPerUnit) * unitCount,
+        admin_notes: preferredQuote?.notes || '',
+        authorized_by_name: user?.name || '',
+        authorized_by_email: user?.email || '',
+        authorized_by_role: user?.adminRole || 'GA Admin',
+        authorized_at: '',
+        signature_data_url: '',
+      });
+    },
+    [user]
+  );
+
   const openDetail = async (b: EnrichedBookingForPdf) => {
     try {
-      const res = await apiRequest<{
-        booking: EnrichedBookingForPdf;
-        quotes: (VendorQuote & { vendor_name?: string })[];
-      }>(`/api/bookings/${b.booking_id}`);
-      setSelectedBooking(res.booking);
-      setQuotes(res.quotes || []);
+      const [detailRes, refs] = await Promise.all([
+        apiRequest<{
+          booking: EnrichedBookingForPdf;
+          quotes: (VendorQuote & { vendor_name?: string })[];
+        }>(`/api/bookings/${b.booking_id}`),
+        b.booking_kind === 'EXTERNAL' && isAdmin ? loadExternalReferences() : Promise.resolve({ vendors: vendors, externalTypes: externalVehicleTypes }),
+      ]);
+      setSelectedBooking(detailRes.booking);
+      setQuotes(detailRes.quotes || []);
+      if (detailRes.booking.booking_kind === 'EXTERNAL' && isAdmin) {
+        initBudgetFormFromBooking(detailRes.booking, detailRes.quotes || [], refs.vendors);
+      }
       setDetailOpen(true);
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Gagal memuat detail.', 'error');
@@ -229,19 +367,116 @@ export function BookingsListPage({
 
   const openQuoteModal = async (b: EnrichedBookingForPdf) => {
     try {
-      const vRes = await apiRequest<{ vendors: Vendor[] }>('/api/vendors');
-      const activeVendors = vRes.vendors.filter((v) => v.active_status === 'aktif');
-      setVendors(activeVendors);
+      const refs = await loadExternalReferences();
+      const matchedExtType = refs.externalTypes.find(
+        (t) => t.name.toLowerCase() === String(b.external_vehicle_type || '').toLowerCase()
+      );
       setSelectedBooking(b);
       setQuoteForm((prev) => ({
         ...prev,
-        vendor_id: activeVendors[0]?.vendor_id || '',
-        vehicle_type: b.external_vehicle_type || 'Big Bus',
+        vendor_id: refs.vendors[0]?.vendor_id || '',
+        vehicle_type: b.external_vehicle_type || refs.externalTypes[0]?.name || 'Big Bus',
+        capacity: matchedExtType?.default_capacity || 50,
         unit_count: b.external_unit_count || 1,
+        unit_rental_price: 4500000,
+        toll_cost_per_unit: 0,
+        parking_cost_per_unit: 0,
+        portal_cost_per_unit: 0,
+        lunch_cost_per_unit: 0,
+        notes: '',
       }));
       setQuoteModalOpen(true);
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Gagal memuat daftar vendor.', 'error');
+    }
+  };
+
+  const applyQuoteToBudgetForm = (q: VendorQuote & { vendor_name?: string }) => {
+    const unitCount = Math.max(1, Number(q.unit_count || 1));
+    const rentalPerUnit = Number(
+      q.unit_rental_price ?? Math.round(Number(q.rental_price || 0) / unitCount)
+    );
+    const tollPerUnit = Number(q.toll_cost_per_unit || 0);
+    const parkingPerUnit = Number(q.parking_cost_per_unit || 0);
+    const portalPerUnit = Number(q.portal_cost_per_unit || 0);
+    const lunchPerUnit = Number(q.lunch_cost_per_unit || 0);
+    setBudgetForm((prev) => ({
+      ...prev,
+      selected_quote_id: q.quote_id,
+      vendor_id: q.vendor_id,
+      vendor_name: q.vendor_name || vendors.find((v) => v.vendor_id === q.vendor_id)?.company_name || '',
+      vehicle_choice: q.vehicle_type,
+      vehicle_capacity: q.capacity,
+      vehicle_year: q.vehicle_year,
+      unit_count: unitCount,
+      rental_price_per_unit: rentalPerUnit,
+      toll_cost_per_unit: tollPerUnit,
+      parking_cost_per_unit: parkingPerUnit,
+      portal_cost_per_unit: portalPerUnit,
+      lunch_cost_per_unit: lunchPerUnit,
+      total_rental_cost: rentalPerUnit * unitCount,
+      total_toll_cost: tollPerUnit * unitCount,
+      total_parking_cost: parkingPerUnit * unitCount,
+      total_portal_cost: portalPerUnit * unitCount,
+      total_lunch_cost: lunchPerUnit * unitCount,
+      grand_total_cost:
+        (rentalPerUnit + tollPerUnit + parkingPerUnit + portalPerUnit + lunchPerUnit) * unitCount,
+      admin_notes: q.notes || prev.admin_notes,
+    }));
+    notify(`Penawaran ${q.vendor_name || ''} dimuat ke formulir Lampiran Anggaran.`, 'info');
+  };
+
+  const handleSaveBudgetAttachment = async (downloadPdfAfter: boolean) => {
+    if (!selectedBooking) return;
+    if (!budgetForm.vehicle_choice.trim()) {
+      notify('Pilihan kendaraan yang akan digunakan wajib diisi.', 'warning');
+      return;
+    }
+    if (downloadPdfAfter && !budgetForm.signature_data_url) {
+      notify('Silakan bubuhkan tanda tangan Admin otorisasi sebelum mengunduh lampiran PDF.', 'warning');
+      return;
+    }
+    setSavingBudget(true);
+    try {
+      const doSave = () =>
+        apiRequest<{ booking: EnrichedBookingForPdf }>(
+          `/api/bookings/${selectedBooking.booking_id}/budget-attachment`,
+          {
+            method: 'PUT',
+            body: JSON.stringify(budgetForm),
+          }
+        );
+      let res: { booking: EnrichedBookingForPdf };
+      try {
+        res = await doSave();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'GOOGLE_SHEETS_REAUTH_REQUIRED') {
+          const token = await reauthorizeGoogleWorkspace();
+          if (!token) throw err;
+          res = await doSave();
+        } else {
+          throw err;
+        }
+      }
+      setSelectedBooking(res.booking);
+      if (res.booking.external_budget_attachment) {
+        setBudgetForm(res.booking.external_budget_attachment);
+      }
+      notify('Catatan pilihan kendaraan, rincian anggaran, dan tanda tangan otorisasi tersimpan.', 'success');
+      await loadBookings();
+      // Refresh quotes list so any synced quote cost updates cleanly
+      const refreshedDetail = await apiRequest<{
+        booking: EnrichedBookingForPdf;
+        quotes: (VendorQuote & { vendor_name?: string })[];
+      }>(`/api/bookings/${selectedBooking.booking_id}`);
+      setQuotes(refreshedDetail.quotes || []);
+      if (downloadPdfAfter) {
+        exportExternalBudgetAttachmentPdf(res.booking);
+      }
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menyimpan lampiran anggaran.', 'error');
+    } finally {
+      setSavingBudget(false);
     }
   };
 
@@ -592,6 +827,16 @@ export function BookingsListPage({
                         >
                           <Download className="h-3.5 w-3.5" />
                         </Button>
+                        {isAdmin && b.booking_kind === 'EXTERNAL' && b.external_budget_attachment && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => exportExternalBudgetAttachmentPdf(b)}
+                            title="Unduh Lampiran Anggaran & Otorisasi (PDF)"
+                          >
+                            <FileCheck2 className="h-3.5 w-3.5 text-[#1755CE]" />
+                          </Button>
+                        )}
                         {isAdmin && (
                           <Button
                             variant="ghost"
@@ -867,9 +1112,9 @@ export function BookingsListPage({
                 </div>
               )}
 
-              {/* External Vendor Quotes Comparison Table (Admin Only) */}
+              {/* External Vendor Quotes Comparison & Management Budget Attachment (Admin Only) */}
               {isAdmin && selectedBooking.booking_kind === 'EXTERNAL' && (
-                <div className="space-y-3 border-t border-slate-200 pt-4">
+                <div className="space-y-4 border-t border-slate-200 pt-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
                       <Bus className="h-4 w-4 text-[#1755CE]" />
@@ -878,7 +1123,7 @@ export function BookingsListPage({
                   </div>
                   {quotes.length === 0 ? (
                     <div className="text-xs text-slate-500 border border-dashed border-slate-200 rounded-lg p-4 text-center">
-                      Belum ada penawaran vendor tercatat. Gunakan tombol &ldquo;Catat Penawaran Vendor&rdquo;.
+                      Belum ada penawaran vendor tercatat. Gunakan tombol &ldquo;Catat Penawaran Vendor&rdquo; atau lengkapi catatan anggaran di bawah.
                     </div>
                   ) : (
                     <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -887,9 +1132,9 @@ export function BookingsListPage({
                           <tr>
                             <th className="p-2.5">Vendor & Unit</th>
                             <th className="p-2.5">Tahun / Kapasitas</th>
-                            <th className="p-2.5">Total Biaya</th>
+                            <th className="p-2.5">Rincian & Total Biaya</th>
                             <th className="p-2.5">Verifikasi Keselamatan</th>
-                            <th className="p-2.5 text-right">Pilih</th>
+                            <th className="p-2.5 text-right">Aksi</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -900,11 +1145,15 @@ export function BookingsListPage({
                               q.verify_driver_qualification &&
                               q.verify_safety_equipment &&
                               q.verify_school_policy;
+                            const uCount = Math.max(1, Number(q.unit_count || 1));
+                            const unitRental = Number(
+                              q.unit_rental_price ?? Math.round(Number(q.rental_price || 0) / uCount)
+                            );
                             return (
                               <tr key={q.quote_id} className={q.is_selected ? 'bg-blue-50/60' : ''}>
                                 <td className="p-2.5">
                                   <div className="font-semibold text-slate-900">{q.vendor_name}</div>
-                                  <div className="text-slate-500">
+                                  <div className="text-slate-600">
                                     {q.unit_count} x {q.vehicle_type}
                                   </div>
                                   <div className="text-[11px] text-slate-400">{q.facilities}</div>
@@ -912,8 +1161,11 @@ export function BookingsListPage({
                                 <td className="p-2.5 tabular-nums">
                                   {q.vehicle_year} · {q.capacity} kursi
                                 </td>
-                                <td className="p-2.5 font-semibold tabular-nums">
-                                  {formatIdr(q.total_cost)}
+                                <td className="p-2.5 tabular-nums">
+                                  <div className="font-semibold text-slate-900">{formatIdr(q.total_cost)}</div>
+                                  <div className="text-[11px] text-slate-500">
+                                    Sewa {formatIdr(unitRental)}/unit + Tambahan {formatIdr(q.extra_cost)}
+                                  </div>
                                 </td>
                                 <td className="p-2.5">
                                   {verifiedAll ? (
@@ -926,19 +1178,32 @@ export function BookingsListPage({
                                     </span>
                                   )}
                                 </td>
-                                <td className="p-2.5 text-right space-x-1">
-                                  {q.is_selected ? (
-                                    <StatusLabel status={selectedBooking.status} />
-                                  ) : (
+                                <td className="p-2.5 text-right space-y-1">
+                                  <div className="flex flex-col items-end gap-1">
                                     <Button
+                                      type="button"
                                       size="sm"
-                                      variant="outline"
-                                      disabled={!verifiedAll}
-                                      onClick={() => void handleSelectVendor(q.quote_id, true)}
+                                      variant="ghost"
+                                      className="h-7 px-2 text-[11px] text-[#1755CE]"
+                                      onClick={() => applyQuoteToBudgetForm(q)}
                                     >
-                                      Pilih & Pesan
+                                      <FileText className="h-3 w-3" />
+                                      Muat ke Lampiran
                                     </Button>
-                                  )}
+                                    {q.is_selected ? (
+                                      <StatusLabel status={selectedBooking.status} />
+                                    ) : (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2 text-[11px]"
+                                        disabled={!verifiedAll}
+                                        onClick={() => void handleSelectVendor(q.quote_id, true)}
+                                      >
+                                        Pilih & Pesan
+                                      </Button>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
                             );
@@ -947,6 +1212,293 @@ export function BookingsListPage({
                       </table>
                     </div>
                   )}
+
+                  {/* Catatan Pilihan Kendaraan & Lampiran Pengajuan Anggaran ke Manajemen */}
+                  {(() => {
+                    const unitCount = Math.max(1, Number(budgetForm.unit_count || 1));
+                    const totalRental = Number(budgetForm.rental_price_per_unit || 0) * unitCount;
+                    const totalToll = Number(budgetForm.toll_cost_per_unit || 0) * unitCount;
+                    const totalParking = Number(budgetForm.parking_cost_per_unit || 0) * unitCount;
+                    const totalPortal = Number(budgetForm.portal_cost_per_unit || 0) * unitCount;
+                    const totalLunch = Number(budgetForm.lunch_cost_per_unit || 0) * unitCount;
+                    const grandTotal =
+                      totalRental + totalToll + totalParking + totalPortal + totalLunch;
+
+                    return (
+                      <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                              <FileCheck2 className="h-4 w-4 text-[#1755CE]" />
+                              Catatan Penawaran Vendor & Lampiran Pengajuan Anggaran (PDF)
+                            </h4>
+                            <p className="text-[11px] text-slate-600 mt-0.5">
+                              Lengkapi pilihan kendaraan, biaya sewa per bis, serta estimasi tol, parkir, portal, dan makan siang sesuai jumlah bis yang disewa sebagai lampiran pengajuan ke atasan/manajemen.
+                            </p>
+                          </div>
+                          {selectedBooking.external_budget_attachment && (
+                            <span className="inline-flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Lampiran Tersimpan
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                          <div className="sm:col-span-2">
+                            <Label>Vendor Terpilih / Penyedia</Label>
+                            <Select
+                              value={budgetForm.vendor_id || ''}
+                              onChange={(e) => {
+                                const vId = e.target.value;
+                                const vName = vendors.find((v) => v.vendor_id === vId)?.company_name || '';
+                                setBudgetForm((prev) => ({
+                                  ...prev,
+                                  vendor_id: vId,
+                                  vendor_name: vName || prev.vendor_name,
+                                }));
+                              }}
+                            >
+                              <option value="">-- Pilih Vendor atau ketik manual --</option>
+                              {vendors.map((v) => (
+                                <option key={v.vendor_id} value={v.vendor_id}>
+                                  {v.company_name}
+                                </option>
+                              ))}
+                            </Select>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <Label>Nama Vendor (Tercetak di PDF)</Label>
+                            <Input
+                              value={budgetForm.vendor_name}
+                              onChange={(e) =>
+                                setBudgetForm((prev) => ({ ...prev, vendor_name: e.target.value }))
+                              }
+                              placeholder="Nama PO / Perusahaan Transportasi"
+                            />
+                          </div>
+
+                          <div className="sm:col-span-2">
+                            <Label>Pilihan Kendaraan yang Digunakan</Label>
+                            <Input
+                              list="external-vehicle-choices"
+                              value={budgetForm.vehicle_choice}
+                              onChange={(e) =>
+                                setBudgetForm((prev) => ({ ...prev, vehicle_choice: e.target.value }))
+                              }
+                              placeholder="Contoh: Big Bus 50 Seat Executive"
+                            />
+                            <datalist id="external-vehicle-choices">
+                              {externalVehicleTypes.map((vt) => (
+                                <option key={vt.vehicle_type_id} value={vt.name} />
+                              ))}
+                            </datalist>
+                          </div>
+                          <div>
+                            <Label>Jumlah Bis / Unit Disewa</Label>
+                            <Input
+                              type="number"
+                              min={1}
+                              value={budgetForm.unit_count}
+                              onChange={(e) =>
+                                setBudgetForm((prev) => ({
+                                  ...prev,
+                                  unit_count: Math.max(1, Number(e.target.value || 1)),
+                                }))
+                              }
+                            />
+                          </div>
+                          <div>
+                            <Label>Kapasitas / Tahun</Label>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <Input
+                                type="number"
+                                min={1}
+                                value={budgetForm.vehicle_capacity}
+                                onChange={(e) =>
+                                  setBudgetForm((prev) => ({
+                                    ...prev,
+                                    vehicle_capacity: Number(e.target.value || 0),
+                                  }))
+                                }
+                                title="Kapasitas kursi"
+                              />
+                              <Input
+                                type="number"
+                                min={2000}
+                                value={budgetForm.vehicle_year}
+                                onChange={(e) =>
+                                  setBudgetForm((prev) => ({
+                                    ...prev,
+                                    vehicle_year: Number(e.target.value || new Date().getFullYear()),
+                                  }))
+                                }
+                                title="Tahun kendaraan"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Itemized Cost Table per Bus */}
+                        <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                              <tr>
+                                <th className="p-2.5 font-semibold">Komponen Biaya</th>
+                                <th className="p-2.5 font-semibold w-44">Biaya per Bis / Unit (IDR)</th>
+                                <th className="p-2.5 font-semibold text-center w-24">Jumlah Bis</th>
+                                <th className="p-2.5 font-semibold text-right w-40">Subtotal (IDR)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {[
+                                {
+                                  key: 'rental_price_per_unit' as const,
+                                  label: 'Biaya Sewa per Bis / Kendaraan',
+                                  subtotal: totalRental,
+                                },
+                                {
+                                  key: 'toll_cost_per_unit' as const,
+                                  label: 'Biaya Tol (per Bis)',
+                                  subtotal: totalToll,
+                                },
+                                {
+                                  key: 'parking_cost_per_unit' as const,
+                                  label: 'Biaya Parkir (per Bis)',
+                                  subtotal: totalParking,
+                                },
+                                {
+                                  key: 'portal_cost_per_unit' as const,
+                                  label: 'Biaya Portal / Retribusi (per Bis)',
+                                  subtotal: totalPortal,
+                                },
+                                {
+                                  key: 'lunch_cost_per_unit' as const,
+                                  label: 'Biaya Makan Siang Kru / Sopir (per Bis)',
+                                  subtotal: totalLunch,
+                                },
+                              ].map((row) => (
+                                <tr key={row.key}>
+                                  <td className="p-2.5 font-medium text-slate-800">{row.label}</td>
+                                  <td className="p-2">
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      step={1000}
+                                      value={budgetForm[row.key]}
+                                      onChange={(e) =>
+                                        setBudgetForm((prev) => ({
+                                          ...prev,
+                                          [row.key]: Math.max(0, Number(e.target.value || 0)),
+                                        }))
+                                      }
+                                      className="h-8 text-xs tabular-nums"
+                                    />
+                                  </td>
+                                  <td className="p-2.5 text-center text-slate-600 tabular-nums">
+                                    × {unitCount} unit
+                                  </td>
+                                  <td className="p-2.5 text-right font-semibold text-slate-900 tabular-nums">
+                                    {formatIdr(row.subtotal)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                            <tfoot className="bg-blue-50/80 border-t border-blue-200">
+                              <tr>
+                                <td colSpan={3} className="p-2.5 font-bold text-slate-900">
+                                  TOTAL PENGAJUAN ANGGARAN ({unitCount} UNIT / BIS)
+                                </td>
+                                <td className="p-2.5 text-right font-bold text-sm text-[#1755CE] tabular-nums">
+                                  {formatIdr(grandTotal)}
+                                </td>
+                              </tr>
+                            </tfoot>
+                          </table>
+                        </div>
+
+                        <div>
+                          <Label>Catatan Pilihan Kendaraan & Rekomendasi Admin (Untuk Manajemen)</Label>
+                          <Textarea
+                            value={budgetForm.admin_notes}
+                            onChange={(e) =>
+                              setBudgetForm((prev) => ({ ...prev, admin_notes: e.target.value }))
+                            }
+                            placeholder="Contoh: Dipilih 2 unit Big Bus 50 Seat Executive tahun 2024 karena KIR & sabuk pengaman tiap kursi lengkap. Biaya tol, parkir, portal, dan makan siang kru diajukan sesuai jumlah bis..."
+                          />
+                        </div>
+
+                        {/* Admin Authorization & Digital Signature */}
+                        <div className="rounded-lg border border-slate-200 bg-white p-3.5 space-y-3">
+                          <div className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                            <PenTool className="h-3.5 w-3.5 text-[#1755CE]" />
+                            Otorisasi & Tanda Tangan Digital Admin
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <div>
+                              <Label>Nama Admin Pemberi Otorisasi</Label>
+                              <Input
+                                value={budgetForm.authorized_by_name}
+                                onChange={(e) =>
+                                  setBudgetForm((prev) => ({
+                                    ...prev,
+                                    authorized_by_name: e.target.value,
+                                  }))
+                                }
+                                placeholder="Nama lengkap Admin GA"
+                              />
+                            </div>
+                            <div>
+                              <Label>Jabatan / Peran Otorisasi</Label>
+                              <Input
+                                value={budgetForm.authorized_by_role}
+                                onChange={(e) =>
+                                  setBudgetForm((prev) => ({
+                                    ...prev,
+                                    authorized_by_role: e.target.value,
+                                  }))
+                                }
+                                placeholder="General Affairs Admin / Super Admin"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <Label>Tanda Tangan Admin (Tercantum di Lampiran PDF)</Label>
+                            <SignaturePad
+                              value={budgetForm.signature_data_url}
+                              onChange={(sig) =>
+                                setBudgetForm((prev) => ({ ...prev, signature_data_url: sig }))
+                              }
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap justify-end gap-2 pt-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={savingBudget}
+                            onClick={() => void handleSaveBudgetAttachment(false)}
+                          >
+                            <Save className="h-3.5 w-3.5" />
+                            {savingBudget ? 'Menyimpan...' : 'Simpan Catatan'}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={savingBudget}
+                            onClick={() => void handleSaveBudgetAttachment(true)}
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            {savingBudget
+                              ? 'Memproses...'
+                              : 'Simpan & Unduh Lampiran Anggaran (PDF)'}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -1172,7 +1724,7 @@ export function BookingsListPage({
           <DialogHeader>
             <DialogTitle>Catat Penawaran Vendor — {selectedBooking?.booking_number}</DialogTitle>
             <DialogDescription>
-              Lengkapi harga sewa, fasilitas, dan checklist verifikasi keselamatan vendor.
+              Lengkapi pilihan kendaraan, biaya sewa per bis, komponen operasional (tol, parkir, portal, makan siang), dan verifikasi keselamatan vendor.
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleAddQuote} className="space-y-4">
@@ -1192,44 +1744,129 @@ export function BookingsListPage({
                 </Select>
               </div>
               <div>
-                <Label>Jenis Unit Ditawarkan</Label>
+                <Label>Pilihan Jenis Unit Ditawarkan</Label>
                 <Input
+                  list="quote-external-vehicle-types"
                   value={quoteForm.vehicle_type}
                   onChange={(e) => setQuoteForm({ ...quoteForm, vehicle_type: e.target.value })}
                   required
                 />
+                <datalist id="quote-external-vehicle-types">
+                  {externalVehicleTypes.map((vt) => (
+                    <option key={vt.vehicle_type_id} value={vt.name} />
+                  ))}
+                </datalist>
               </div>
               <div>
-                <Label>Kapasitas Kursi</Label>
+                <Label>Jumlah Bis / Unit Disewa</Label>
                 <Input
                   type="number"
-                  value={quoteForm.capacity}
-                  onChange={(e) => setQuoteForm({ ...quoteForm, capacity: Number(e.target.value) })}
+                  min={1}
+                  value={quoteForm.unit_count}
+                  onChange={(e) =>
+                    setQuoteForm({ ...quoteForm, unit_count: Math.max(1, Number(e.target.value || 1)) })
+                  }
                 />
               </div>
               <div>
-                <Label>Tahun Kendaraan</Label>
-                <Input
-                  type="number"
-                  value={quoteForm.vehicle_year}
-                  onChange={(e) => setQuoteForm({ ...quoteForm, vehicle_year: Number(e.target.value) })}
-                />
+                <Label>Kapasitas Kursi / Tahun</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={quoteForm.capacity}
+                    onChange={(e) => setQuoteForm({ ...quoteForm, capacity: Number(e.target.value) })}
+                    title="Kapasitas kursi"
+                  />
+                  <Input
+                    type="number"
+                    min={2000}
+                    value={quoteForm.vehicle_year}
+                    onChange={(e) => setQuoteForm({ ...quoteForm, vehicle_year: Number(e.target.value) })}
+                    title="Tahun kendaraan"
+                  />
+                </div>
               </div>
-              <div>
-                <Label>Harga Sewa (IDR)</Label>
-                <Input
-                  type="number"
-                  value={quoteForm.rental_price}
-                  onChange={(e) => setQuoteForm({ ...quoteForm, rental_price: Number(e.target.value) })}
-                />
+            </div>
+
+            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50/70 space-y-2.5">
+              <div className="text-xs font-semibold text-slate-800">
+                Rincian Biaya per Bis / Unit (Otomatis dikalikan {quoteForm.unit_count} unit)
               </div>
-              <div>
-                <Label>Biaya Tambahan / Tol / Parkir (IDR)</Label>
-                <Input
-                  type="number"
-                  value={quoteForm.extra_cost}
-                  onChange={(e) => setQuoteForm({ ...quoteForm, extra_cost: Number(e.target.value) })}
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div>
+                  <Label>Sewa per Bis / Unit (IDR)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    value={quoteForm.unit_rental_price}
+                    onChange={(e) =>
+                      setQuoteForm({ ...quoteForm, unit_rental_price: Math.max(0, Number(e.target.value || 0)) })
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Biaya Tol per Bis (IDR)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    value={quoteForm.toll_cost_per_unit}
+                    onChange={(e) =>
+                      setQuoteForm({ ...quoteForm, toll_cost_per_unit: Math.max(0, Number(e.target.value || 0)) })
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Biaya Parkir per Bis (IDR)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    value={quoteForm.parking_cost_per_unit}
+                    onChange={(e) =>
+                      setQuoteForm({ ...quoteForm, parking_cost_per_unit: Math.max(0, Number(e.target.value || 0)) })
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Biaya Portal per Bis (IDR)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    value={quoteForm.portal_cost_per_unit}
+                    onChange={(e) =>
+                      setQuoteForm({ ...quoteForm, portal_cost_per_unit: Math.max(0, Number(e.target.value || 0)) })
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Makan Siang Kru per Bis (IDR)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    value={quoteForm.lunch_cost_per_unit}
+                    onChange={(e) =>
+                      setQuoteForm({ ...quoteForm, lunch_cost_per_unit: Math.max(0, Number(e.target.value || 0)) })
+                    }
+                  />
+                </div>
+                <div className="flex flex-col justify-end rounded-md bg-blue-50 border border-blue-200 px-3 py-1.5">
+                  <span className="text-[11px] text-slate-600">Total ({quoteForm.unit_count} unit)</span>
+                  <span className="text-sm font-bold text-[#1755CE] tabular-nums">
+                    {formatIdr(
+                      quoteForm.unit_count *
+                        (quoteForm.unit_rental_price +
+                          quoteForm.toll_cost_per_unit +
+                          quoteForm.parking_cost_per_unit +
+                          quoteForm.portal_cost_per_unit +
+                          quoteForm.lunch_cost_per_unit)
+                    )}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -1238,6 +1875,15 @@ export function BookingsListPage({
               <Input
                 value={quoteForm.facilities}
                 onChange={(e) => setQuoteForm({ ...quoteForm, facilities: e.target.value })}
+              />
+            </div>
+
+            <div>
+              <Label>Catatan Penawaran / Pilihan Kendaraan</Label>
+              <Textarea
+                value={quoteForm.notes}
+                onChange={(e) => setQuoteForm({ ...quoteForm, notes: e.target.value })}
+                placeholder="Catatan mengenai spesifikasi unit, ketentuan tol/parkir/portal/makan siang, atau pertimbangan pemilihan vendor..."
               />
             </div>
 

@@ -190,6 +190,33 @@ export interface BookingApprovalTrace {
   notes: string;
 }
 
+export interface ExternalBudgetAttachment {
+  selected_quote_id?: string;
+  vendor_id?: string;
+  vendor_name: string;
+  vehicle_choice: string;
+  vehicle_capacity: number;
+  vehicle_year: number;
+  unit_count: number;
+  rental_price_per_unit: number;
+  toll_cost_per_unit: number;
+  parking_cost_per_unit: number;
+  portal_cost_per_unit: number;
+  lunch_cost_per_unit: number;
+  total_rental_cost: number;
+  total_toll_cost: number;
+  total_parking_cost: number;
+  total_portal_cost: number;
+  total_lunch_cost: number;
+  grand_total_cost: number;
+  admin_notes: string;
+  authorized_by_name: string;
+  authorized_by_email: string;
+  authorized_by_role: string;
+  authorized_at: string;
+  signature_data_url: string;
+}
+
 export interface Booking {
   booking_id: string;
   booking_number: string;
@@ -219,6 +246,7 @@ export interface Booking {
   facilities_needed: string;
   special_requirements: string;
   estimated_budget: number;
+  external_budget_attachment?: ExternalBudgetAttachment;
   // Common & workflow
   notes: string;
   status: BookingStatus;
@@ -244,6 +272,11 @@ export interface VendorQuote {
   capacity: number;
   unit_count: number;
   vehicle_year: number;
+  unit_rental_price?: number;
+  toll_cost_per_unit?: number;
+  parking_cost_per_unit?: number;
+  portal_cost_per_unit?: number;
+  lunch_cost_per_unit?: number;
   rental_price: number;
   extra_cost: number;
   total_cost: number;

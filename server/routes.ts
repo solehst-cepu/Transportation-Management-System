@@ -32,6 +32,7 @@ import { dbStore, runWithGoogleOAuthToken, SHEET_KEYS, SheetsSyncError } from '.
 import {
   Booking,
   BookingStatus,
+  ExternalBudgetAttachment,
   INITIAL_INSPECTION_TEMPLATE_ITEMS,
   Inspection,
   InspectionItemResult,
@@ -2136,8 +2137,28 @@ apiRouter.post('/bookings/:id/quotes', requireAuth, requireRole('ADMIN'), async 
         if (!booking) throw new Error('Pengajuan tidak ditemukan.');
         if (booking.booking_kind !== 'EXTERNAL') throw new Error('Penawaran vendor hanya untuk pemesanan eksternal.');
 
-        const rentalPrice = Number(req.body.rental_price || 0);
-        const extraCost = Number(req.body.extra_cost || 0);
+        const unitCount = Math.max(1, Number(req.body.unit_count || booking.external_unit_count || 1));
+        const hasPerUnitBreakdown =
+          req.body.unit_rental_price !== undefined ||
+          req.body.toll_cost_per_unit !== undefined ||
+          req.body.parking_cost_per_unit !== undefined ||
+          req.body.portal_cost_per_unit !== undefined ||
+          req.body.lunch_cost_per_unit !== undefined;
+
+        const unitRentalPrice = hasPerUnitBreakdown
+          ? Math.max(0, Number(req.body.unit_rental_price || 0))
+          : Math.max(0, Number(req.body.rental_price || 0) / unitCount);
+        const tollPerUnit = Math.max(0, Number(req.body.toll_cost_per_unit || 0));
+        const parkingPerUnit = Math.max(0, Number(req.body.parking_cost_per_unit || 0));
+        const portalPerUnit = Math.max(0, Number(req.body.portal_cost_per_unit || 0));
+        const lunchPerUnit = Math.max(0, Number(req.body.lunch_cost_per_unit || 0));
+
+        const rentalPrice = hasPerUnitBreakdown
+          ? unitRentalPrice * unitCount
+          : Math.max(0, Number(req.body.rental_price || 0));
+        const extraCost = hasPerUnitBreakdown
+          ? (tollPerUnit + parkingPerUnit + portalPerUnit + lunchPerUnit) * unitCount
+          : Math.max(0, Number(req.body.extra_cost || 0));
         const now = new Date().toISOString();
 
         const quote = {
@@ -2146,8 +2167,13 @@ apiRouter.post('/bookings/:id/quotes', requireAuth, requireRole('ADMIN'), async 
           vendor_id: String(req.body.vendor_id || ''),
           vehicle_type: String(req.body.vehicle_type || booking.external_vehicle_type),
           capacity: Number(req.body.capacity || 45),
-          unit_count: Number(req.body.unit_count || booking.external_unit_count || 1),
+          unit_count: unitCount,
           vehicle_year: Number(req.body.vehicle_year || new Date().getFullYear()),
+          unit_rental_price: unitRentalPrice,
+          toll_cost_per_unit: tollPerUnit,
+          parking_cost_per_unit: parkingPerUnit,
+          portal_cost_per_unit: portalPerUnit,
+          lunch_cost_per_unit: lunchPerUnit,
           rental_price: rentalPrice,
           extra_cost: extraCost,
           total_cost: rentalPrice + extraCost,
@@ -2175,11 +2201,18 @@ apiRouter.post('/bookings/:id/quotes', requireAuth, requireRole('ADMIN'), async 
             timestamp: now,
             from_status: prev,
             to_status: 'Penawaran Diterima',
-            notes: `Mencatat penawaran vendor (${quote.vehicle_type}).`,
+            notes: `Mencatat penawaran vendor (${quote.unit_count} x ${quote.vehicle_type}).`,
           });
         }
 
-        appendAuditLog(db, req.sessionUser!, 'ADD_VENDOR_QUOTE', 'VENDOR_QUOTES', quote.quote_id, `Catat penawaran untuk ${booking.booking_number}`);
+        appendAuditLog(
+          db,
+          req.sessionUser!,
+          'ADD_VENDOR_QUOTE',
+          'VENDOR_QUOTES',
+          quote.quote_id,
+          `Catat penawaran untuk ${booking.booking_number}`
+        );
         return quote;
       },
       { requireRemoteSync: true }
@@ -2189,6 +2222,137 @@ apiRouter.post('/bookings/:id/quotes', requireAuth, requireRole('ADMIN'), async 
     sendMutationError(res, err, 'Gagal mencatat penawaran vendor.');
   }
 });
+
+// Save External Bus Budget Attachment Note & Admin Authorization Signature
+apiRouter.put(
+  '/bookings/:id/budget-attachment',
+  requireAuth,
+  requireRole('ADMIN'),
+  async (req: AuthedRequest, res: Response) => {
+    try {
+      const updated = await dbStore.mutate(
+        ['BOOKINGS', 'VENDOR_QUOTES', 'AUDIT_LOGS'],
+        (db) => {
+          const booking = db.BOOKINGS.find((b) => b.booking_id === req.params.id);
+          if (!booking) throw new Error('Pengajuan tidak ditemukan.');
+          if (booking.booking_kind !== 'EXTERNAL') {
+            throw new Error('Catatan lampiran anggaran hanya berlaku untuk order Bus / Eksternal.');
+          }
+
+          const vehicleChoice = String(req.body.vehicle_choice || booking.external_vehicle_type || '').trim();
+          if (!vehicleChoice) {
+            throw new Error('Pilihan kendaraan yang akan digunakan wajib diisi.');
+          }
+
+          const unitCount = Math.max(1, Number(req.body.unit_count || booking.external_unit_count || 1));
+          const rentalPerUnit = Math.max(0, Number(req.body.rental_price_per_unit || 0));
+          const tollPerUnit = Math.max(0, Number(req.body.toll_cost_per_unit || 0));
+          const parkingPerUnit = Math.max(0, Number(req.body.parking_cost_per_unit || 0));
+          const portalPerUnit = Math.max(0, Number(req.body.portal_cost_per_unit || 0));
+          const lunchPerUnit = Math.max(0, Number(req.body.lunch_cost_per_unit || 0));
+
+          const totalRental = rentalPerUnit * unitCount;
+          const totalToll = tollPerUnit * unitCount;
+          const totalParking = parkingPerUnit * unitCount;
+          const totalPortal = portalPerUnit * unitCount;
+          const totalLunch = lunchPerUnit * unitCount;
+          const grandTotal = totalRental + totalToll + totalParking + totalPortal + totalLunch;
+
+          const signatureDataUrl = String(req.body.signature_data_url || '');
+          if (signatureDataUrl) {
+            if (!/^data:image\/(png|jpeg|jpg);base64,/i.test(signatureDataUrl)) {
+              throw new Error('Format tanda tangan digital tidak valid.');
+            }
+            if (signatureDataUrl.length > 45000) {
+              throw new Error('Ukuran gambar tanda tangan terlalu besar. Silakan gambar ulang lebih ringkas.');
+            }
+          }
+
+          const selectedVendorId = String(req.body.vendor_id || booking.selected_vendor_id || '');
+          const vendorRecord = selectedVendorId
+            ? db.VENDORS.find((v) => v.vendor_id === selectedVendorId)
+            : undefined;
+          const vendorName = String(req.body.vendor_name || vendorRecord?.company_name || '').trim();
+          const now = new Date().toISOString();
+
+          const attachment: ExternalBudgetAttachment = {
+            selected_quote_id: String(req.body.selected_quote_id || booking.selected_quote_id || ''),
+            vendor_id: selectedVendorId,
+            vendor_name: vendorName,
+            vehicle_choice: vehicleChoice,
+            vehicle_capacity: Number(req.body.vehicle_capacity || 50),
+            vehicle_year: Number(req.body.vehicle_year || new Date().getFullYear()),
+            unit_count: unitCount,
+            rental_price_per_unit: rentalPerUnit,
+            toll_cost_per_unit: tollPerUnit,
+            parking_cost_per_unit: parkingPerUnit,
+            portal_cost_per_unit: portalPerUnit,
+            lunch_cost_per_unit: lunchPerUnit,
+            total_rental_cost: totalRental,
+            total_toll_cost: totalToll,
+            total_parking_cost: totalParking,
+            total_portal_cost: totalPortal,
+            total_lunch_cost: totalLunch,
+            grand_total_cost: grandTotal,
+            admin_notes: String(req.body.admin_notes || '').trim(),
+            authorized_by_name: String(req.body.authorized_by_name || req.sessionUser!.name).trim(),
+            authorized_by_email: req.sessionUser!.email,
+            authorized_by_role: String(
+              req.body.authorized_by_role || req.sessionUser!.adminRole || 'GA Admin'
+            ).trim(),
+            authorized_at: now,
+            signature_data_url: signatureDataUrl,
+          };
+
+          booking.external_budget_attachment = attachment;
+          if (grandTotal > 0) {
+            booking.estimated_budget = grandTotal;
+          }
+          booking.updated_at = now;
+
+          // Keep linked quote synchronized if selected_quote_id is specified
+          if (attachment.selected_quote_id) {
+            const linkedQuote = db.VENDOR_QUOTES.find(
+              (q) => q.quote_id === attachment.selected_quote_id && q.booking_id === booking.booking_id
+            );
+            if (linkedQuote) {
+              linkedQuote.vehicle_type = attachment.vehicle_choice;
+              linkedQuote.capacity = attachment.vehicle_capacity;
+              linkedQuote.vehicle_year = attachment.vehicle_year;
+              linkedQuote.unit_count = attachment.unit_count;
+              linkedQuote.unit_rental_price = rentalPerUnit;
+              linkedQuote.toll_cost_per_unit = tollPerUnit;
+              linkedQuote.parking_cost_per_unit = parkingPerUnit;
+              linkedQuote.portal_cost_per_unit = portalPerUnit;
+              linkedQuote.lunch_cost_per_unit = lunchPerUnit;
+              linkedQuote.rental_price = totalRental;
+              linkedQuote.extra_cost = totalToll + totalParking + totalPortal + totalLunch;
+              linkedQuote.total_cost = grandTotal;
+              if (attachment.admin_notes) {
+                linkedQuote.notes = attachment.admin_notes;
+              }
+            }
+          }
+
+          appendAuditLog(
+            db,
+            req.sessionUser!,
+            'SAVE_BUDGET_ATTACHMENT',
+            'BOOKINGS',
+            booking.booking_id,
+            `Simpan catatan lampiran anggaran ${booking.booking_number} (${unitCount} x ${vehicleChoice}, Total Rp ${grandTotal.toLocaleString('id-ID')})`
+          );
+
+          return sanitizeBookingForUser(db, booking);
+        },
+        { requireRemoteSync: true }
+      );
+      res.json({ booking: updated });
+    } catch (err) {
+      sendMutationError(res, err, 'Gagal menyimpan catatan anggaran & otorisasi.');
+    }
+  }
+);
 
 apiRouter.post('/bookings/:id/select-vendor', requireAuth, requireRole('ADMIN'), async (req: AuthedRequest, res: Response) => {
   const { quote_id, confirm_booked, notes } = req.body as {
